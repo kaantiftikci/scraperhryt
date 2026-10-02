@@ -1,0 +1,317 @@
+"""12punto kaynağı (gerçek site: https://12punto.com.tr — 12punto.com park edilmiş alan adıdır).
+
+Keşif: ``/rss`` (20 karışık öğe) + ``/rss/<kategori>`` (ayarlardaki her kategori) + ``/<kategori>`` liste sayfaları +
+``backfill_days > 0`` ise gün gün ``/Arama/Ara?search=&StartDate=YYYY-MM-DD&EndDate=YYYY-MM-DD`` arşiv araması.
+RSS bağlantıları ``http://`` gelir → https'e çevrilir, ``www.`` atılır. Yalnızca ``/<kategori>/<slug>-<id>`` biçimi
+(``^/[a-z0-9-]+/[a-z0-9-]+-\\d{3,}$``) haber kabul edilir; yazar köşeleri (``/yazarlar/<ad>/<slug>-<id>``) elenir.
+Haber sayfası JSON-LD LİSTESİNİN ilk ``NewsArticle`` öğesinden ve ``section.details`` paragraflarından ayrıştırılır.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timedelta
+from urllib.parse import urljoin, urlsplit
+
+import requests
+
+from ..config import Settings, get_settings
+from ..models import NewsRecord
+from ..textutil import html_to_text, tr_lower
+from .base import (
+    ISTANBUL,
+    DiscoveredLink,
+    HttpClient,
+    HttpError,
+    clean_text,
+    dedupe_links,
+    extract_meta,
+    extract_paragraphs,
+    first_nonempty,
+    jsonld_keywords,
+    jsonld_name,
+    jsonld_url,
+    looks_like_xml,
+    make_soup,
+    paragraphize_flat_text,
+    parse_jsonld_newsarticle,
+    parse_tr_date,
+    rss_items,
+    split_keywords,
+    text_of,
+    xml_child_attr,
+    xml_child_text,
+    xml_root,
+)
+
+log = logging.getLogger(__name__)
+
+ARTICLE_PATH_RE = re.compile(r"^/[a-z0-9-]+/[a-z0-9-]+-\d{3,}$")
+_NO_RESULTS_RE = re.compile(r"sonuç bulunamadı")
+_PUBLISHED_RE = re.compile(r"yayınlanma\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
+_UPDATED_RE = re.compile(r"güncelle(?:n)?me\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
+_DROP_PARAGRAPH_PATTERNS = tuple(
+    re.compile(pattern, re.I)
+    for pattern in (
+        r"haberlerini algoritmaya bırakma",
+        r"^haber kaynağı\s*:",
+        r"^abone ol$",
+        r"^bağlantı kopyalandı$",
+    )
+)
+_DROP_SELECTORS = (
+    "img",
+    "script",
+    "style",
+    "noscript",
+    "iframe",
+    "figure",
+    "video",
+    "audio",
+    "ins",
+    "form",
+    ".news-source",
+    ".add-source",
+    ".add-source-link",
+    ".share",
+    ".date",
+    ".gnews",
+    ".tooltip",
+)
+
+
+class PuntoSource:
+    """12punto kazıyıcısı (``Source`` protokolü)."""
+
+    name = "12punto"
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.base_url = self.settings.punto_base_url.rstrip("/")
+        self.host = urlsplit(self.base_url).netloc.lower().removeprefix("www.")
+        self.categories = list(self.settings.punto_category_list)
+
+    # --- URL ---
+    def normalize_url(self, href: str | None) -> str | None:
+        """Bağlantıyı ``https://12punto.com.tr/<kategori>/<slug>-<id>`` biçimine çevirir; haber değilse None."""
+        if not href:
+            return None
+        parts = urlsplit(urljoin(self.base_url + "/", href.strip()))
+        if parts.netloc.lower().removeprefix("www.") != self.host:
+            return None
+        path = re.sub(r"/{2,}", "/", parts.path).rstrip("/").lower()
+        if not ARTICLE_PATH_RE.match(path):
+            return None
+        return f"https://{self.host}{path}"
+
+    @staticmethod
+    def _category_from_path(url: str) -> str:
+        return urlsplit(url).path.strip("/").split("/", 1)[0]
+
+    # --- keşif ---
+    def discover(
+        self, client: HttpClient, *, backfill_days: int = 0, limit: int | None = None
+    ) -> list[DiscoveredLink]:
+        collected: list[DiscoveredLink] = []
+        seen_keys: set[str] = set()
+
+        def add(found: list[DiscoveredLink]) -> bool:
+            """Bağlantıları ekler; limit dolduysa True döndürür (daha fazla istek yapılmaz)."""
+            for link in found:
+                key = link.canonical
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                collected.append(link)
+            return limit is not None and len(seen_keys) >= limit
+
+        feeds = [("", f"{self.base_url}/rss")] + [(cat, f"{self.base_url}/rss/{cat}") for cat in self.categories]
+        for category, url in feeds:
+            if add(self._fetch_feed(client, url, category)):
+                return self._finalize(collected, limit)
+        for category in self.categories:
+            if add(self._fetch_listing(client, category)):
+                return self._finalize(collected, limit)
+        if backfill_days > 0:
+            today = datetime.now(ISTANBUL).date()
+            for offset in range(backfill_days + 1):
+                day = today - timedelta(days=offset)
+                if add(self._fetch_archive_day(client, day.isoformat())):
+                    return self._finalize(collected, limit)
+        return self._finalize(collected, limit)
+
+    @staticmethod
+    def _finalize(links: list[DiscoveredLink], limit: int | None) -> list[DiscoveredLink]:
+        unique = dedupe_links(links)
+        return unique[:limit] if limit is not None else unique
+
+    def _fetch_feed(self, client: HttpClient, url: str, category: str) -> list[DiscoveredLink]:
+        try:
+            text = client.get_text(url)
+        except HttpError as exc:
+            level = logging.INFO if exc.status == 404 else logging.WARNING
+            log.log(level, "12punto RSS atlandı (%s): %s", url, exc)
+            return []
+        except requests.RequestException as exc:
+            log.warning("12punto RSS alınamadı (%s): %s", url, exc)
+            return []
+        if not looks_like_xml(text):
+            log.info("12punto RSS XML değil, atlandı: %s", url)
+            return []
+        found = self.parse_rss(text, category_hint=category)
+        log.info("12punto RSS %s: %d haber bağlantısı", category or "genel", len(found))
+        return found
+
+    def _fetch_listing(self, client: HttpClient, category: str) -> list[DiscoveredLink]:
+        url = f"{self.base_url}/{category}"
+        try:
+            html = client.get_text(url)
+        except HttpError as exc:
+            level = logging.INFO if exc.status == 404 else logging.WARNING
+            log.log(level, "12punto liste sayfası atlandı (%s): %s", url, exc)
+            return []
+        except requests.RequestException as exc:
+            log.warning("12punto liste sayfası alınamadı (%s): %s", url, exc)
+            return []
+        found = self.parse_listing(html, category_hint=category)
+        log.info("12punto liste %s: %d haber bağlantısı", category, len(found))
+        return found
+
+    def archive_url(self, day: str) -> str:
+        return f"{self.base_url}/Arama/Ara?search=&StartDate={day}&EndDate={day}"
+
+    def _fetch_archive_day(self, client: HttpClient, day: str) -> list[DiscoveredLink]:
+        url = self.archive_url(day)
+        try:
+            html = client.get_text(url)
+        except (HttpError, requests.RequestException) as exc:
+            log.warning("12punto arşiv araması alınamadı (%s): %s", day, exc)
+            return []
+        found = self.parse_search(html)
+        log.info("12punto arşiv %s: %d haber bağlantısı", day, len(found))
+        return found
+
+    def parse_rss(self, xml_text: str | bytes, category_hint: str = "") -> list[DiscoveredLink]:
+        root = xml_root(xml_text)
+        if root is None:
+            log.warning("12punto RSS ayrıştırılamadı (XML değil)")
+            return []
+        links: list[DiscoveredLink] = []
+        for item in rss_items(root):
+            url = self.normalize_url(xml_child_text(item, "link") or xml_child_text(item, "guid"))
+            if not url:
+                continue
+            summary = xml_child_text(item, "description")
+            links.append(
+                DiscoveredLink(
+                    url=url,
+                    title_hint=clean_text(xml_child_text(item, "title")),
+                    published_hint=parse_tr_date(xml_child_text(item, "pubDate")),
+                    category_hint=category_hint or self._category_from_path(url),
+                    rss_summary=clean_text(html_to_text(summary)) if "<" in summary else clean_text(summary),
+                    image_hint=xml_child_attr(item, "enclosure", "url") or xml_child_attr(item, "content", "url"),
+                    origin="rss",
+                )
+            )
+        return dedupe_links(links)
+
+    def _links_from_anchors(self, html: str, *, category_hint: str, origin: str) -> list[DiscoveredLink]:
+        soup = make_soup(html)
+        links: list[DiscoveredLink] = []
+        for anchor in soup.select("a[href]"):
+            url = self.normalize_url(anchor.get("href"))
+            if not url:
+                continue
+            links.append(
+                DiscoveredLink(
+                    url=url,
+                    title_hint=clean_text(anchor.get("title") or anchor.get_text(" ")),
+                    category_hint=category_hint or self._category_from_path(url),
+                    origin=origin,
+                )
+            )
+        return dedupe_links(links)
+
+    def parse_listing(self, html: str, category_hint: str = "") -> list[DiscoveredLink]:
+        """Kategori sayfasındaki haber bağlantıları (``a.category-item`` dahil sayfadaki tüm haber URL'leri)."""
+        return self._links_from_anchors(html, category_hint=category_hint, origin="listing")
+
+    def parse_search(self, html: str) -> list[DiscoveredLink]:
+        """Arşiv arama sonucu sayfasındaki haber bağlantıları."""
+        if _NO_RESULTS_RE.search(tr_lower(html)):
+            log.info("12punto arşiv araması sonuç döndürmedi; sayfadaki diğer haber bağlantıları alınıyor")
+        return self._links_from_anchors(html, category_hint="", origin="archive")
+
+    # --- haber ---
+    def fetch_article(self, client: HttpClient, link: DiscoveredLink) -> NewsRecord | None:
+        html = client.get_text(link.url)
+        return self.parse_article(html, link)
+
+    def parse_article(self, html: str, link: DiscoveredLink | None = None, url: str = "") -> NewsRecord | None:
+        """Haber sayfasını ``NewsRecord``'a çevirir (JSON-LD listesi + ``section.details``)."""
+        link = link or DiscoveredLink(url=url)
+        if not link.url:
+            raise ValueError("parse_article için link veya url gerekli")
+        soup = make_soup(html)
+        ld = parse_jsonld_newsarticle(soup) or {}
+        meta = extract_meta(soup)
+
+        title = first_nonempty(ld.get("headline"), text_of(soup.select_one("h1")), meta.get("og:title"), link.title_hint)
+        subtitle = first_nonempty(
+            ld.get("description"), meta.get("description"), meta.get("og:description"), link.rss_summary
+        )
+        date_spans = soup.select("div.date span")
+        date_text = tr_lower(" | ".join(text_of(span) for span in date_spans) if date_spans else soup.get_text(" "))
+        published_match = _PUBLISHED_RE.search(date_text)
+        updated_match = _UPDATED_RE.search(date_text)
+        published_at = (
+            parse_tr_date(ld.get("datePublished"))
+            or parse_tr_date(published_match.group(1) if published_match else None)
+            or link.published_hint
+            or parse_tr_date(meta.get("datepublished"))
+        )
+        updated_at = (
+            parse_tr_date(ld.get("dateModified"))
+            or parse_tr_date(updated_match.group(1) if updated_match else None)
+            or parse_tr_date(meta.get("datemodified"))
+        )
+        content = self._choose_content(self._content_from_html(soup), paragraphize_flat_text(ld.get("articleBody")))
+        if not title or not content:
+            log.warning("12punto haberi eksik (başlık=%s, içerik=%d karakter): %s", bool(title), len(content), link.url)
+            return None
+
+        category = first_nonempty(ld.get("articleSection"), link.category_hint, self._category_from_path(link.url))
+        author = first_nonempty(jsonld_name(ld.get("author")), meta.get("author"), meta.get("article:author"))
+        tags = jsonld_keywords(ld.get("keywords")) or split_keywords(meta.get("keywords"))
+        image_url = first_nonempty(
+            meta.get("og:image"), meta.get("og:image:url"), jsonld_url(ld.get("image")), link.image_hint
+        )
+        return NewsRecord.new(
+            source=self.name,
+            content_url=link.url,
+            title=title,
+            subtitle=subtitle,
+            content=content,
+            published_at=published_at,
+            updated_at=updated_at,
+            category=category,
+            author=author,
+            image_url=image_url,
+            tags=tags,
+        )
+
+    @staticmethod
+    def _content_from_html(soup) -> str:
+        body = soup.select_one("section.details")
+        if body is None:
+            return ""
+        paragraphs = extract_paragraphs(body, drop_selectors=_DROP_SELECTORS, drop_patterns=_DROP_PARAGRAPH_PATTERNS)
+        return "\n\n".join(paragraphs)
+
+    @staticmethod
+    def _choose_content(html_text: str, body_text: str) -> str:
+        """HTML paragrafları (apostrof/başlık/paragraf yapısı korunmuş) tercih edilir; HTML çıkarımı
+        JSON-LD gövdesinden belirgin biçimde kısa kaldıysa (eksik ayrıştırma) JSON-LD gövdesi kullanılır."""
+        if html_text and len(html_text) >= 0.7 * len(body_text):
+            return html_text
+        return body_text or html_text

@@ -41,19 +41,54 @@ _NUMBER_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
 _LIST_SPLIT_RE = re.compile(r"[,;\n|]+")
 
 _TOPIC_ALIASES: dict[str, str] = {
-    "politika": "siyaset", "siyasi": "siyaset", "ic politika": "siyaset", "hukumet": "siyaset",
-    "yonetim": "siyaset", "parti": "siyaset", "secim": "siyaset",
-    "ekonomik": "ekonomi", "piyasa": "ekonomi", "ticaret": "ekonomi", "enerji": "ekonomi", "maliye": "ekonomi",
-    "adalet": "hukuk", "yargi": "hukuk", "yasal": "hukuk", "hukuki": "hukuk", "suc": "hukuk",
-    "adalet-hukuk": "hukuk", "adli": "hukuk",
-    "asayis": "güvenlik", "teror": "güvenlik", "savunma": "güvenlik", "polis": "güvenlik", "askeri": "güvenlik",
-    "diplomasi": "dış politika", "uluslararasi": "dış politika", "dunya": "dış politika",
-    "dis iliskiler": "dış politika", "dis-politika": "dış politika",
-    "finans": "finans/fon", "fon": "finans/fon", "bankacilik": "finans/fon", "borsa": "finans/fon",
-    "finans-fon": "finans/fon", "finans fon": "finans/fon", "finans / fon": "finans/fon", "yatirim": "finans/fon",
-    "toplum": "sosyal", "sosyal politika": "sosyal", "egitim": "sosyal", "saglik": "sosyal", "yasam": "sosyal",
-    "cevre": "sosyal", "kultur": "sosyal",
-    "other": "diğer", "spor": "diğer", "magazin": "diğer", "genel": "diğer",
+    "politika": "siyaset",
+    "siyasi": "siyaset",
+    "ic politika": "siyaset",
+    "hukumet": "siyaset",
+    "yonetim": "siyaset",
+    "parti": "siyaset",
+    "secim": "siyaset",
+    "ekonomik": "ekonomi",
+    "piyasa": "ekonomi",
+    "ticaret": "ekonomi",
+    "enerji": "ekonomi",
+    "maliye": "ekonomi",
+    "adalet": "hukuk",
+    "yargi": "hukuk",
+    "yasal": "hukuk",
+    "hukuki": "hukuk",
+    "suc": "hukuk",
+    "adalet-hukuk": "hukuk",
+    "adli": "hukuk",
+    "asayis": "güvenlik",
+    "teror": "güvenlik",
+    "savunma": "güvenlik",
+    "polis": "güvenlik",
+    "askeri": "güvenlik",
+    "diplomasi": "dış politika",
+    "uluslararasi": "dış politika",
+    "dunya": "dış politika",
+    "dis iliskiler": "dış politika",
+    "dis-politika": "dış politika",
+    "finans": "finans/fon",
+    "fon": "finans/fon",
+    "bankacilik": "finans/fon",
+    "borsa": "finans/fon",
+    "finans-fon": "finans/fon",
+    "finans fon": "finans/fon",
+    "finans / fon": "finans/fon",
+    "yatirim": "finans/fon",
+    "toplum": "sosyal",
+    "sosyal politika": "sosyal",
+    "egitim": "sosyal",
+    "saglik": "sosyal",
+    "yasam": "sosyal",
+    "cevre": "sosyal",
+    "kultur": "sosyal",
+    "other": "diğer",
+    "spor": "diğer",
+    "magazin": "diğer",
+    "genel": "diğer",
 }
 _TOPIC_BY_FOLD: dict[str, str] = {tr_fold(t): t for t in TOPICS}
 
@@ -213,7 +248,7 @@ class ScoringStats:
 
 
 class ScoringService:
-    """``Queue.ARTICLES_KEYWORD`` tüketicisi; her haberi LLM ile puanlar ve ``article.scored`` ile yayınlar."""
+    """``Queue.ARTICLES_KEYWORD`` tüketicisi; her haberi LLM ile puanlar, ``article.scored`` ile yayınlar."""
 
     def __init__(self, settings: Settings, broker: Broker, llm: LLM) -> None:
         self.settings = settings
@@ -252,7 +287,9 @@ class ScoringService:
                 )
             except LLMUnavailable as exc:
                 self.stats.unavailable += 1
-                log.warning("LLM erişilemiyor, mesaj yeniden denenecek [%s] %s: %s", record.source, title, exc)
+                log.warning(
+                    "LLM erişilemiyor, mesaj yeniden denenecek [%s] %s: %s", record.source, title, exc
+                )
                 raise Retry(f"LLM erişilemiyor: {exc}") from exc
             except LLMBadOutput as exc:
                 last_error = exc
@@ -311,9 +348,16 @@ class ScoringService:
             self.settings.ollama_max_content_chars,
         )
         if not self.llm.health():
-            log.warning("Ollama şu an erişilemiyor (%s); mesajlar gecikmeli yeniden denenecek", self.settings.ollama_base_url)
+            log.warning(
+                "Ollama şu an erişilemiyor (%s); mesajlar gecikmeli yeniden denenecek",
+                self.settings.ollama_base_url,
+            )
         elif not self.llm.model_available():
-            log.warning("Model '%s' Ollama'da yüklü görünmüyor; `ollama pull %s` çalıştırın", self.llm.model_name, self.llm.model_name)
+            log.warning(
+                "Model '%s' Ollama'da yüklü görünmüyor; `ollama pull %s` çalıştırın",
+                self.llm.model_name,
+                self.llm.model_name,
+            )
         processed = self.broker.consume(
             Queue.ARTICLES_KEYWORD,
             self.handle,

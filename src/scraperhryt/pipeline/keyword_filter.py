@@ -51,7 +51,7 @@ class KeywordFilterService:
             )
 
     def classify(self, record: NewsRecord) -> list[KeywordHit]:
-        """Başlık + alt başlık + içerik üzerinde eşleşen anahtar kelimeleri (sayı ve örnek bağlamla) döndürür."""
+        """Başlık + alt başlık + içerikte eşleşen anahtar kelimeleri (sayı ve örnek bağlamla) döndürür."""
         return self.matcher.find(record.text_for_matching())
 
     def handle(self, msg: Message) -> None:
@@ -112,5 +112,7 @@ class KeywordFilterService:
             stop_event=stop_event,
             max_messages=max_messages,
         )
-        log.info("Anahtar kelime filtresi durdu: %d mesaj işlendi, istatistik=%s", processed, self.stats.as_dict())
+        log.info(
+            "Anahtar kelime filtresi durdu: %d mesaj işlendi, istatistik=%s", processed, self.stats.as_dict()
+        )
         return processed

@@ -1,9 +1,11 @@
 """LLM istemcileri: Ollama HTTP API, test için FakeOllama ve çevrimdışı/deterministik HeuristicLLM.
 
-Üçü de ``LLM`` protokolünü uygular; ScoringService, ReportBuilder ve QAEngine yalnızca bu protokole bağımlıdır.
+Üçü de ``LLM`` protokolünü uygular; ScoringService, ReportBuilder ve QAEngine yalnızca bu protokole
+bağımlıdır.
 
 Hata sınıfları:
-- ``LLMUnavailable``: bağlantı hatası, zaman aşımı, 5xx veya sunucunun reddettiği istek → çağıran ``Retry`` üretir.
+- ``LLMUnavailable``: bağlantı hatası, zaman aşımı, 5xx veya sunucunun reddettiği istek → çağıran
+  ``Retry`` üretir.
 - ``LLMBadOutput``: model çıktısı JSON olarak çözümlenemedi → çağıran süreç içinde tekrar dener.
 """
 
@@ -263,7 +265,9 @@ class OllamaClient:
         message = data.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise LLMBadOutput(f"Ollama /api/chat boş içerik döndürdü (done_reason={data.get('done_reason')!r})")
+            raise LLMBadOutput(
+                f"Ollama /api/chat boş içerik döndürdü (done_reason={data.get('done_reason')!r})"
+            )
         return extract_json_object(content)
 
     def generate_text(
@@ -335,7 +339,9 @@ class OllamaClient:
             return False
         wanted = normalize_model_name(self._model)
         if wanted not in names:
-            log.warning("Ollama'da model bulunamadı: %s (mevcut: %s)", self._model, ", ".join(sorted(names)) or "-")
+            log.warning(
+                "Ollama'da model bulunamadı: %s (mevcut: %s)", self._model, ", ".join(sorted(names)) or "-"
+            )
             return False
         return True
 
@@ -588,8 +594,34 @@ _NEGATIVE_CAP = 30
 _CAP_WORD = r"[A-ZÇĞİÖŞÜ][\wçğıöşüâîû'’.-]*"
 _ENTITY_RE = re.compile(rf"(?<![\w'’]){_CAP_WORD}(?:[ \t]+{_CAP_WORD})*")
 _ENTITY_STOP = {
-    "bu", "şu", "o", "ve", "ile", "ama", "fakat", "ancak", "son", "yeni", "bir", "da", "de", "ya", "hem", "ne",
-    "ki", "için", "çok", "daha", "en", "her", "ilk", "dün", "bugün", "yarın", "flaş", "açıklama",
+    "bu",
+    "şu",
+    "o",
+    "ve",
+    "ile",
+    "ama",
+    "fakat",
+    "ancak",
+    "son",
+    "yeni",
+    "bir",
+    "da",
+    "de",
+    "ya",
+    "hem",
+    "ne",
+    "ki",
+    "için",
+    "çok",
+    "daha",
+    "en",
+    "her",
+    "ilk",
+    "dün",
+    "bugün",
+    "yarın",
+    "flaş",
+    "açıklama",
 }
 _SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -686,7 +718,10 @@ class HeuristicLLM:
             f"risk terimleri: {risk_text}; spor/magazin işaretleri: {neg_text}. "
             f"Hesaplanan skor {alarm_score}/100."
         )
-        summary = first_sentences(_join_sentences(title, content.replace(TRUNCATION_MARKER, ""))) or "Özet üretilemedi."
+        summary = (
+            first_sentences(_join_sentences(title, content.replace(TRUNCATION_MARKER, "")))
+            or "Özet üretilemedi."
+        )
         return {
             "alarm_score": alarm_score,
             "is_alarm": alarm_score >= self.settings.alarm_threshold,

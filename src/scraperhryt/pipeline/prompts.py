@@ -46,50 +46,54 @@ _ISTANBUL_TZ = timezone(timedelta(hours=3), name="+03:00")
 
 
 def build_system_prompt(alarm_threshold: int) -> str:
-    """Analist rolü + rubrik + katı JSON talimatı. ``alarm_threshold`` politikayla tutarlı olsun diye gömülür."""
+    """Analist rolü + rubrik + katı JSON talimatı (eşik politikayla tutarlı olsun diye gömülür)."""
     topics = ", ".join(TOPICS)
     return (
-        "Sen Türkiye gündemini izleyen deneyimli bir haber analistisin. Görevin, sana verilen tek bir haberi "
-        "kamu yönetimi, siyaset, hukuk, güvenlik ve finans açısından değerlendirip bir ALARM SKORU üretmek.\n"
+        "Sen Türkiye gündemini izleyen deneyimli bir haber analistisin. Görevin, sana verilen tek bir "
+        "haberi kamu yönetimi, siyaset, hukuk, güvenlik ve finans açısından değerlendirip bir ALARM SKORU "
+        "üretmek.\n"
         "\n"
         "ALARM RUBRİĞİ (alarm_score, 0-100 arası tam sayı):\n"
-        "- 80-100 KRİTİK: Cumhurbaşkanı veya bakan düzeyinde geniş etkili kararlar/kararnameler; fon, banka veya "
-        "finansal suç soruşturmaları (kara para, dolandırıcılık, TMSF/MASAK/SPK işlemleri); kamu görevlilerinin "
-        "tutuklanması/gözaltına alınması; piyasaları doğrudan etkileyecek politika değişiklikleri; büyük güvenlik "
-        "krizleri.\n"
+        "- 80-100 KRİTİK: Cumhurbaşkanı veya bakan düzeyinde geniş etkili kararlar/kararnameler; fon, "
+        "banka veya finansal suç soruşturmaları (kara para, dolandırıcılık, TMSF/MASAK/SPK işlemleri); "
+        "kamu görevlilerinin tutuklanması/gözaltına alınması; piyasaları doğrudan etkileyecek politika "
+        "değişiklikleri; büyük güvenlik krizleri.\n"
         "- 60-79 ÖNEMLİ: Bakanlık düzeyinde açıklama ve düzenlemeler, önemli yasa teklifleri, üst düzey "
         "görevden alma/atama, kapsamlı operasyonlar, ekonomik göstergelerde dikkat çeken gelişmeler.\n"
         "- 30-59 DİKKATE DEĞER: Siyasi tartışmalar, parti içi gelişmeler, yerel yönetim kararları, "
         "soruşturma iddiaları, sınırlı etkili düzenlemeler.\n"
-        "- 0-29 RUTİN/İLGİSİZ: Spor, magazin, yaşam, tanıtım/PR, hava durumu, geçmiş olayların tekrarı, "
-        "anahtar kelimenin yalnızca yan anlamda geçtiği haberler.\n"
+        "- 0-29 RUTİN/İLGİSİZ: Spor, magazin, yaşam, tanıtım/PR, hava durumu, geçmiş olayların "
+        "tekrarı, anahtar kelimenin yalnızca yan anlamda geçtiği haberler.\n"
         "\n"
-        "ANAHTAR KELİME BAĞLAMI: Haber, 'bakan', 'cumhurbaşkanı', 'fon' gibi anahtar kelimelerle filtrelenmiş "
-        "olabilir. Kelimenin bağlamını MUTLAKA kontrol et: 'denize bakan oda' ifadesindeki 'bakan' bir fiildir "
-        "(bakmak), bir bakan (minister) değildir; 'fon' müzikteki fon müziği veya arka plan anlamında da "
-        "kullanılabilir. Yanlış bağlamdaki eşleşmeler skoru YÜKSELTMEZ ve reason alanında bunu açıkça belirt.\n"
+        "ANAHTAR KELİME BAĞLAMI: Haber, 'bakan', 'cumhurbaşkanı', 'fon' gibi anahtar kelimelerle "
+        "filtrelenmiş olabilir. Kelimenin bağlamını MUTLAKA kontrol et: 'denize bakan oda' ifadesindeki "
+        "'bakan' bir fiildir (bakmak), bir bakan (minister) değildir; 'fon' müzikteki fon müziği veya "
+        "arka plan anlamında da kullanılabilir. Yanlış bağlamdaki eşleşmeler skoru YÜKSELTMEZ ve reason "
+        "alanında bunu açıkça belirt.\n"
         "\n"
-        f"Alarm eşiği {alarm_threshold} puandır: is_alarm alanı alarm_score >= {alarm_threshold} ise true, "
-        "aksi halde false olmalıdır.\n"
+        f"Alarm eşiği {alarm_threshold} puandır: is_alarm alanı alarm_score >= {alarm_threshold} ise "
+        "true, aksi halde false olmalıdır.\n"
         "\n"
         "ÇIKTI KURALLARI:\n"
         "- YALNIZCA geçerli bir JSON nesnesi döndür. Markdown, kod bloğu, açıklama veya ek metin YAZMA.\n"
         "- Tam olarak şu anahtarları kullan: alarm_score, is_alarm, reason, summary, topics, entities.\n"
         "- alarm_score: 0-100 arası tam sayı.\n"
         "- is_alarm: true/false (boolean).\n"
-        "- reason: Bu skoru neden verdiğini 1-3 cümlede Türkçe açıkla; eşleşen anahtar kelimelerin bağlamına "
-        "(gerçek bakan mı, fiil mi; gerçek fon mu, yan anlam mı) mutlaka değin.\n"
+        "- reason: Bu skoru neden verdiğini 1-3 cümlede Türkçe açıkla; eşleşen anahtar kelimelerin "
+        "bağlamına (gerçek bakan mı, fiil mi; gerçek fon mu, yan anlam mı) mutlaka değin.\n"
         "- summary: Haberin 2-3 cümlelik tarafsız Türkçe özeti (kim, ne, ne zaman, sonuç).\n"
         f"- topics: Yalnızca şu listeden 1-3 konu: {topics}.\n"
-        "- entities: Haberde adı geçen kişi, kurum, parti ve şirketlerin listesi (özel adlar, en fazla 10).\n"
+        "- entities: Haberde adı geçen kişi, kurum, parti ve şirketlerin listesi (özel adlar, en fazla "
+        "10).\n"
         "- Tüm metin alanları Türkçe olmalı.\n"
         "\n"
         "ÖRNEK ÇIKTI:\n"
-        '{"alarm_score": 85, "is_alarm": true, "reason": "İçişleri Bakanı\'nın doğrudan talimatıyla başlatılan '
-        "ve 12 belediye yetkilisinin tutuklanmasıyla sonuçlanan soruşturma; 'bakan' kelimesi gerçek bir bakanı "
-        'ifade ediyor.", "summary": "İçişleri Bakanlığı koordinasyonunda yürütülen operasyonda 12 belediye '
-        "yetkilisi tutuklandı. Soruşturma ihale yolsuzluğu iddialarına dayanıyor. Bakan, sürecin genişleyeceğini "
-        'açıkladı.", "topics": ["hukuk", "siyaset"], "entities": ["İçişleri Bakanlığı", "Ali Yerlikaya"]}'
+        '{"alarm_score": 85, "is_alarm": true, "reason": "İçişleri Bakanı\'nın doğrudan talimatıyla '
+        "başlatılan ve 12 belediye yetkilisinin tutuklanmasıyla sonuçlanan soruşturma; 'bakan' kelimesi "
+        'gerçek bir bakanı ifade ediyor.", "summary": "İçişleri Bakanlığı koordinasyonunda yürütülen '
+        "operasyonda 12 belediye yetkilisi tutuklandı. Soruşturma ihale yolsuzluğu iddialarına dayanıyor. "
+        'Bakan, sürecin genişleyeceğini açıkladı.", "topics": ["hukuk", "siyaset"], '
+        '"entities": ["İçişleri Bakanlığı", "Ali Yerlikaya"]}'
     )
 
 

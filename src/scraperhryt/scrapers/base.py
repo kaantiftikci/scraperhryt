@@ -15,8 +15,9 @@ import threading
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -31,6 +32,7 @@ from ..textutil import normalize_ws, tr_lower
 log = logging.getLogger(__name__)
 
 ISTANBUL = ZoneInfo("Europe/Istanbul")
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # ---------------------------------------------------------------------------------------------------------
 # Metin temizliği
@@ -175,7 +177,7 @@ class HttpClient:
 
     # --- istek ---
     def _request(self, url: str, *, params: dict[str, Any] | None, timeout: float | None) -> requests.Response:
-        host = requests.utils.urlparse(url).netloc.lower()
+        host = urlsplit(url).netloc.lower()
         self._throttle(host)
         read_timeout = float(timeout or self.settings.request_timeout)
         response = self.session.get(
@@ -273,7 +275,7 @@ def dedupe_links(links: Iterable[DiscoveredLink]) -> list[DiscoveredLink]:
             order.append(key)
     unique = [merged[key] for key in order]
     dated = [link for link in unique if link.published_hint is not None]
-    dated.sort(key=lambda link: link.published_hint, reverse=True)  # type: ignore[arg-type, return-value]
+    dated.sort(key=lambda link: link.published_hint or _EPOCH, reverse=True)
     undated = [link for link in unique if link.published_hint is None]
     return dated + undated
 
@@ -530,10 +532,11 @@ _EN_MONTHS = {
 }
 _TZ_PART = r"(?:\s*(?P<tz>Z|UTC|GMT|[+-]\d{2}:?\d{2}))?"
 _TIME_PART = r"(?:[T\s,]+(?P<H>\d{1,2})[:.](?P<M>\d{2})(?::(?P<S>\d{2})(?:[.,]\d+)?)?)?"
-_ISO_RE = re.compile(r"(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})" + _TIME_PART + _TZ_PART)
-_TR_NUMERIC_RE = re.compile(r"(?P<d>\d{1,2})[./](?P<m>\d{1,2})[./](?P<y>\d{4})" + _TIME_PART + _TZ_PART)
+_ISO_RE = re.compile(r"(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})" + _TIME_PART + _TZ_PART, re.I)
+_TR_NUMERIC_RE = re.compile(r"(?P<d>\d{1,2})[./](?P<m>\d{1,2})[./](?P<y>\d{4})" + _TIME_PART + _TZ_PART, re.I)
 _RFC_RE = re.compile(
-    r"(?:[a-z]{3},?\s+)?(?P<d>\d{1,2})\s+(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<y>\d{4})" + _TIME_PART + _TZ_PART
+    r"(?:[a-z]{3},?\s+)?(?P<d>\d{1,2})\s+(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<y>\d{4})" + _TIME_PART + _TZ_PART,
+    re.I,
 )
 _TR_MONTH_FIRST_RE = re.compile(r"(?P<mon>[a-zçğıöşü]{3,8})\s+(?P<d>\d{1,2}),?\s+(?P<y>\d{4})" + _TIME_PART)
 _TR_DAY_FIRST_RE = re.compile(r"(?P<d>\d{1,2})\s+(?P<mon>[a-zçğıöşü]{3,8})\s+(?P<y>\d{4})" + _TIME_PART)
@@ -544,7 +547,7 @@ def _tzinfo(token: str | None) -> timezone | ZoneInfo:
         return ISTANBUL
     token = token.upper()
     if token in ("Z", "UTC", "GMT"):
-        return timezone.utc
+        return UTC
     sign = -1 if token[0] == "-" else 1
     digits = token[1:].replace(":", "")
     offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:4]))
@@ -602,10 +605,3 @@ def parse_tr_date(text: str | None) -> datetime | None:
             if result is not None:
                 return result
     return None
-
-
-def ensure_aware(value: datetime | None) -> datetime | None:
-    """Saat dilimsiz bir datetime'ı Europe/Istanbul kabul eder; aware olanı aynen döndürür."""
-    if value is None:
-        return None
-    return value if value.tzinfo is not None else value.replace(tzinfo=ISTANBUL)
