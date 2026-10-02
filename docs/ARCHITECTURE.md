@@ -276,15 +276,14 @@ flowchart TB
 `q.alarms` tüketicisidir. Gelen `AlarmEvent`'leri bellek içi tamponda toplar; şu iki koşuldan biri sağlanınca
 `alarm_digest` raporu ister: tamponda `REPORT_DIGEST_EVERY` (10) alarm birikti **veya** son özetten bu yana
 `REPORT_DIGEST_MINUTES` (30) geçti ve tamponda en az bir alarm var. Rapor penceresi tampondaki ilk alarmın
-`raised_at`'inden şimdiye kadardır. Rapor başarıyla yazılıp yayınlanınca tampon boşalır. Tüketici mesajları
-işledikçe `ack`'ler; süreç çökerse tampondaki alarmlar kaybolur ama olaylar `news-alarms`'ta olduğu için
-periyodik rapor onları yine kapsar (özet "en az bir kez" değil "en iyi çaba" garantisi verir; alarmların kendisi
-kaybolmaz).
+`raised_at`'inden şimdiye kadardır. Rapor yazılıp yayınlanınca tampon boşalır. Tasarım gereği tampon bellek
+içidir: süreç çökerse birikmiş ama henüz özetlenmemiş alarmlar o özete girmez; olaylar `news-alarms`'ta olduğu
+için periyodik rapor onları yine kapsar (özet "en iyi çaba", alarmların kendisi "en az bir kez" garantilidir).
 
 **Periyodik tetikleyici — `PeriodicReporter(settings, store, builder, broker)`**
 `run_once()` son `REPORT_WINDOW_HOURS` (24) saat için `periodic` raporu üretir; `run(stop_event)` bunu her
-`REPORT_INTERVAL_MINUTES` (60) dakikada tekrarlar. İlk çalıştırma hemen rapor üretir ki yeniden başlatmalar
-boşluk bırakmasın.
+`REPORT_INTERVAL_MINUTES` (60) dakikada tekrarlar. Pencere her zaman "şimdiden geriye" hesaplandığı için
+yeniden başlatmalar boşluk bırakmaz; en kötü durumda aynı aralık iki raporda kesişir.
 
 **Aggregator — `ArticleStore.stats(since, until)` / `recent_alarms(since, size)`**
 Tek bir ES isteğiyle (`size=0`, `track_total_hits=true`) şu toplulaştırmaları alır:
@@ -301,9 +300,9 @@ alarms}]`), `top_alarms`. Bellek içi depo aynı sözlüğü Python'da hesaplar;
    çağrılır: istatistikler ve en yüksek alarmlar (başlık, skor, gerekçe, kaynak, tarih) tablo halinde modele verilir;
    model yönetici özeti, öne çıkan gelişmeler, kaynak/konu dağılımı ve izlenmesi gereken başlıklar bölümlerini
    yazar. `LLMUnavailable`/`LLMBadOutput` durumunda **şablon anlatı** (aynı bölümler, istatistikten doldurulmuş
-   cümleler) kullanılır; `Report.model` alanı hangisinin kullanıldığını gösterir (LLM modeli ya da `template`).
-3. `Report(report_id, kind, window_start, window_end, stats, narrative, top_alarms, model)` döner. `report_id`
-   `kind + pencere`den türetilen deterministik bir kimliktir; aynı pencere için tekrar üretim ES'te üzerine yazar.
+   cümleler) kullanılır; `Report.model` alanı anlatıyı üreten modeli taşır.
+3. `Report(report_id, kind, window_start, window_end, stats, narrative, top_alarms, model)` döner; `news-reports`'a
+   `report_id` ile upsert edildiği için aynı raporun yeniden yazılması ikinci belge üretmez.
 
 **Report Store — `store.index_report(report)` → `news-reports`**
 `report_id` ile upsert. `stats` ve `top_alarms` `enabled: false` nesne olarak saklanır (sorgulanmaz, olduğu gibi

@@ -11,8 +11,9 @@ değişikliği, yeniden indeksleme. Mimari için [`ARCHITECTURE.md`](ARCHITECTUR
 ### Docker Compose
 
 ```bash
-docker compose up -d rabbitmq elasticsearch        # altyapı (healthcheck'lerin geçmesini bekler)
-docker compose up -d --build                       # scraper, filter, scorer, alarm, reporter, api
+docker compose up -d --build                       # rabbitmq + elasticsearch → setup (tek seferlik) → scraper, filter,
+                                                   # scorer, alarm, reporter, api (healthcheck'ler ve setup beklenir)
+make up                                            # aynı şey (Makefile kısayolu); make down / make logs / make ps
 docker compose --profile kibana up -d              # isteğe bağlı Kibana
 docker compose ps                                  # durum
 docker compose logs -f --tail=100 scorer alarm     # canlı günlük

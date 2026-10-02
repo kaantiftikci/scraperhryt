@@ -60,25 +60,25 @@ alarma gitmeyen kayıtlarda bu alanlar **boş kalır** ama nesne yine de hem Rab
 ollama pull qwen2.5:7b
 ollama pull nomic-embed-text      # isteğe bağlı: RAG'de vektör (kNN) arama için
 
-# 2) Ayar dosyası
+# 2) Ayar dosyası (varsayılanlar compose'a göredir: OLLAMA_BASE_URL=http://host.docker.internal:11434,
+#    RABBITMQ_URL ve ELASTICSEARCH_URL compose servis adlarını kullanır; KEYWORDS ve ALARM_THRESHOLD'u düzenleyin)
 cp .env.example .env
-# Konteynerden ana makinedeki Ollama'ya erişim:
-#   OLLAMA_BASE_URL=http://host.docker.internal:11434
-# Linux'ta host.docker.internal çözümlenmiyorsa ilgili servislere
+# Uygulama konteynerleri ana makinedeki Ollama'ya docker-compose.yml'deki
 #   extra_hosts: ["host.docker.internal:host-gateway"]
-# tanımlı olduğundan emin olun ya da ana makinenin IP'sini yazın.
-# Embedding kullanacaksanız: OLLAMA_EMBEDDING_MODEL=nomic-embed-text, EMBEDDING_DIMS=768
+# eşlemesiyle ulaşır (Linux dahil). Embedding kullanacaksanız:
+#   OLLAMA_EMBEDDING_MODEL=nomic-embed-text, EMBEDDING_DIMS=768
 
-# 3) Altyapı: RabbitMQ (yönetim arayüzü 15672) + Elasticsearch (9200)
-docker compose up -d rabbitmq elasticsearch
-
-# 4) Uygulama servisleri: scraper, filter, scorer, alarm, reporter, api
+# 3) Yığını başlatın: rabbitmq (5672, yönetim 15672) + elasticsearch (9200) → tek seferlik `setup` servisi
+#    (topoloji + indeksler + model denetimi) → scraper, filter, scorer, alarm, reporter, api
 docker compose up -d --build
 
-# 5) Durum
+# 4) Durum
 docker compose ps
 docker compose logs -f scorer alarm
 ```
+
+Elasticsearch konteyneri 1 GB heap ile başlar; Linux'ta `vm.max_map_count` en az 262144 olmalıdır
+(`sudo sysctl -w vm.max_map_count=262144`), aksi halde konteyner başlangıçta çıkar.
 
 - Pano: <http://localhost:8000/> — API belgeleri: <http://localhost:8000/docs>
 - RabbitMQ yönetim arayüzü: <http://localhost:15672> (guest / guest)
@@ -88,8 +88,12 @@ docker compose logs -f scorer alarm
 
 ```bash
 docker compose --profile kibana up -d    # Kibana (5601) — Elasticsearch verisini görselleştirmek için
-docker compose --profile ollama up -d    # Ollama'yı konteynerde çalıştırmak için (OLLAMA_BASE_URL=http://ollama:11434)
+docker compose --profile ollama up -d    # Ollama'yı konteynerde çalıştırmak için; .env'de OLLAMA_BASE_URL=http://ollama:11434
+                                         # yapın. `ollama-pull` servisi OLLAMA_MODEL (ve varsa OLLAMA_EMBEDDING_MODEL)'i indirir.
 ```
+
+`Makefile` sık kullanılan kısayolları içerir: `make up`, `make down`, `make logs`, `make ps`, `make setup`,
+`make check`, `make test`, `make lint`, `make ask Q="soru"`.
 
 ---
 
@@ -99,6 +103,10 @@ docker compose --profile ollama up -d    # Ollama'yı konteynerde çalıştırma
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env                 # ayarlar proje kökündeki .env dosyasından okunur; komutları kökte çalıştırın
+# .env içindeki "yerel çalıştırma" satırlarını açın (compose servis adları yerine localhost):
+#   RABBITMQ_URL=amqp://guest:guest@localhost:5672/%2F
+#   ELASTICSEARCH_URL=http://localhost:9200
+#   OLLAMA_BASE_URL=http://localhost:11434
 
 # RabbitMQ ve Elasticsearch'ü ayrıca başlatın (ör. docker compose up -d rabbitmq elasticsearch)
 # Ollama ana makinede: ollama serve && ollama pull qwen2.5:7b
@@ -134,7 +142,7 @@ deterministik `HeuristicLLM`'i (anahtar kelime/risk terimi sayımına dayalı sk
 
 | Komut | Açıklama |
 |-------|----------|
-| `scraperhryt setup` | RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur. Tekrar çalıştırmak güvenlidir. |
+| `scraperhryt setup` | Veri dizinlerini, RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur, Ollama'da `OLLAMA_MODEL`'in yüklü olduğunu denetler. Tekrar çalıştırmak güvenlidir; compose yığınında `setup` servisi olarak otomatik çalışır. |
 | `scraperhryt check` | RabbitMQ, Elasticsearch ve Ollama erişilebilirliğini ve `OLLAMA_MODEL`'in yüklü olup olmadığını denetler. |
 | `scraperhryt scrape [--once] [--source X] [--backfill-days N]` | Kazıyıcı. `--once` tek tur; `--source hurriyet` veya `--source 12punto` tek kaynak; `--backfill-days N` 12punto arşivini N gün geriye tarar. |
 | `scraperhryt filter` | `q.articles.raw` tüketicisi: anahtar kelime filtresi. |
@@ -143,7 +151,7 @@ deterministik `HeuristicLLM`'i (anahtar kelime/risk terimi sayımına dayalı sk
 | `scraperhryt report` | `q.alarms` tüketicisi (alarm özetleri) + periyodik rapor üretici. |
 | `scraperhryt api` | HTTP API ve pano (`API_HOST:API_PORT`). |
 | `scraperhryt ask "soru"` | RAG soru-cevap: son haberlerden kaynak atıflı Türkçe yanıt üretir. |
-| `scraperhryt run-all [--once] [--in-memory] [--fake-llm]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). SIGINT/SIGTERM ile düzgün kapanır. |
+| `scraperhryt run-all [--once] [--in-memory] [--fake-llm]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). `--once`: kazıyıcı tek tur çalışır, kuyruklar boşalınca özet yazdırıp çıkar (API başlatılmaz). SIGINT/SIGTERM ile düzgün kapanır. |
 
 ---
 
@@ -524,6 +532,8 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 | Haberler ikinci turda gelmiyor | Normal: `SeenStore` (`STATE_DB_PATH`) görülen haberleri 6 saat boyunca yeniden çekmez; içerik özeti değişmeyen haber yeniden yayınlanmaz. | Her şeyi yeniden işlemek için servisleri durdurup `data/state.sqlite3` dosyasını silin. |
 | Anahtar kelime yanlış pozitif ("denize bakan oda") | Filtre kök eşleşmesi yapar; bağlam kararı LLM'e bırakılmıştır (düşük skor → alarm yok, ama kayıt yine ES'te). | Gerekirse `=bakan` (tam kelime) ya da `re:` desenleriyle `KEYWORDS`'ü daraltın. |
 | HTTP 429 / 5xx uyarıları kazıyıcıda | Site yavaş ya da oran sınırı. `HttpClient` 3 denemeye kadar üstel bekler; haber başına hata sayılır, tur devam eder. | `REQUEST_DELAY_SECONDS`'ı artırın, `MAX_ARTICLES_PER_RUN`'ı düşürün. |
+| `elasticsearch` konteyneri hemen çıkıyor (`max virtual memory areas vm.max_map_count [65530] is too low`) | Linux çekirdek sınırı ES için düşük. | `sudo sysctl -w vm.max_map_count=262144` (kalıcı için `/etc/sysctl.conf`), sonra `docker compose up -d elasticsearch`. |
+| Yerel (venv) çalıştırmada `rabbitmq`/`elasticsearch` adları çözümlenemiyor | `.env.example` varsayılanları compose servis adlarını kullanır. | `.env`'deki "yerel çalıştırma" satırlarını (localhost) açın. |
 
 ---
 
