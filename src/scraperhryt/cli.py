@@ -816,13 +816,39 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
     from .scrapers.runner import ScrapeRunner, build_sources
     from .scrapers.state import SeenStore
 
-    in_memory = bool(args.in_memory)
     serve_api = not args.no_api and not args.once
     started_at = utcnow()
     stop = threading.Event()
+
+    llm = build_llm(settings, fake=args.fake_llm, fallback=True)
+    try:
+        store = prepare_store(settings, in_memory=bool(args.in_memory))
+    except Exception as exc:
+        log.error("Depo hazırlanamadı: %s", describe_exc(exc))
+        close_llm(llm)
+        return 1
+
+    # --in-memory (ya da RABBITMQ_URL=memory://) → tek bir InMemoryBroker herkes tarafından paylaşılır;
+    # RabbitMQ'da pika bağlantıları iş parçacığı güvenli olmadığından her tüketici kendi broker'ını kurar.
+    setup_broker = make_broker(settings, in_memory=bool(args.in_memory))
+    shared_broker = setup_broker if isinstance(setup_broker, InMemoryBroker) else None
+    brokers: list[Broker] = [setup_broker]
+
+    def broker_for() -> Broker:
+        if shared_broker is not None:
+            return shared_broker
+        broker = make_broker(settings)
+        brokers.append(broker)
+        return broker
+
+    def make_runner() -> ScrapeRunner:
+        seen = SeenStore(":memory:") if shared_broker is not None else SeenStore(settings.state_db_path)
+        return ScrapeRunner(settings, broker_for(), seen_store=seen, sources=build_sources(settings))
+
     log.info(
-        "run-all başlıyor: mod=%s, tek tur=%s, LLM=%s, API=%s, kaynaklar=%s, anahtar kelimeler=%s, eşik=%d",
-        "bellek içi (RabbitMQ/Elasticsearch yok)" if in_memory else "RabbitMQ + Elasticsearch",
+        "run-all başlıyor: broker=%s, depo=%s, tek tur=%s, LLM=%s, API=%s, kaynaklar=%s, anahtar kelimeler=%s, eşik=%d",
+        "bellek içi" if shared_broker is not None else f"RabbitMQ ({redact_url(settings.rabbitmq_url)})",
+        type(store).__name__,
         "evet" if args.once else "hayır",
         "sezgisel" if args.fake_llm else settings.ollama_model,
         "açık" if serve_api else "kapalı",
@@ -830,37 +856,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
         settings.keywords,
         settings.alarm_threshold,
     )
-
-    llm = build_llm(settings, fake=args.fake_llm, fallback=True)
-    try:
-        store = prepare_store(settings, in_memory=in_memory)
-    except Exception as exc:
-        log.error("Depo hazırlanamadı: %s", describe_exc(exc))
-        close_llm(llm)
-        return 1
-
-    shared_broker: InMemoryBroker | None = None
-    brokers: list[Broker] = []
-
-    def broker_for() -> Broker:
-        """Bellek içi modda herkes aynı broker'ı paylaşır; RabbitMQ'da her iş parçacığı kendi bağlantısını kurar."""
-        nonlocal shared_broker
-        if in_memory:
-            if shared_broker is None:
-                shared_broker = make_broker(settings, in_memory=True)
-                brokers.append(shared_broker)
-            return shared_broker
-        broker = make_broker(settings)
-        brokers.append(broker)
-        return broker
-
-    def make_runner() -> ScrapeRunner:
-        seen = SeenStore(":memory:") if in_memory else SeenStore(settings.state_db_path)
-        return ScrapeRunner(settings, broker_for(), seen_store=seen, sources=build_sources(settings))
-
-    setup_broker = broker_for()
     setup_broker.declare_topology()
-    if not in_memory:
+    if shared_broker is None:
         setup_broker.close()
 
     builder = ReportBuilder(settings, store, llm)
@@ -877,10 +874,10 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
     api_server: Any = None
     try:
         with signal_scope(stop):
-            if in_memory and args.once:
+            if args.once and shared_broker is not None:
                 return run_all_once_in_memory(
                     settings=settings,
-                    broker=setup_broker,  # type: ignore[arg-type]  # bellek içi modda paylaşılan InMemoryBroker
+                    broker=shared_broker,
                     store=store,
                     stop=stop,
                     make_runner=make_runner,
@@ -937,7 +934,7 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     count_label="İşlenen",
                     alarm_count=counters.snapshot().get(str(Queue.ALARMS), 0),
                     alarms=top_alarms(store, started_at),
-                    dead_letters=len(setup_broker.dead_letters) if isinstance(setup_broker, InMemoryBroker) else None,
+                    dead_letters=None,
                 )
             else:
 
