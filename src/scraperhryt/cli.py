@@ -520,6 +520,21 @@ def print_run_summary(
     print("\n".join(lines))
 
 
+def print_ask_answer(settings: Settings, store: Any, llm: Any, question: str) -> bool:
+    """run-all --ask: boru hattı bittikten sonra aynı süreçteki depo üzerinde RAG sorusunu yanıtlar ve yazdırır."""
+    from .reporting.rag import QAEngine
+
+    try:
+        answer = QAEngine(settings, store, llm).ask(question)
+    except Exception as exc:
+        log.error("Soru yanıtlanamadı (%r): %s", question, describe_exc(exc))
+        return False
+    print()
+    print("=== run-all --ask ===")
+    print(format_answer(answer))
+    return True
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Alt komutlar
 # ---------------------------------------------------------------------------------------------------------
@@ -776,8 +791,13 @@ def run_all_once_in_memory(
     stages: Sequence[tuple[str, Any]],
     periodic: Any,
     started_at: datetime,
+    llm: Any = None,
+    question: str | None = None,
 ) -> int:
-    """Tek tur: kazı, ardından kuyrukları sırayla boşalt (filtre → skor → alarm → rapor), özet yazdır."""
+    """Tek tur: kazı, ardından kuyrukları sırayla boşalt (filtre → skor → alarm → rapor), özet yazdır.
+
+    ``question`` verilirse özetten sonra aynı depo üzerinde RAG yanıtı da yazdırılır (``--ask``).
+    """
     runner = make_runner()
     try:
         stats = runner.run_once()
@@ -803,6 +823,8 @@ def run_all_once_in_memory(
         alarms=top_alarms(store, started_at),
         dead_letters=len(broker.dead_letters),
     )
+    if question and not print_ask_answer(settings, store, llm, question):
+        return 1
     return 0
 
 
@@ -819,6 +841,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
     serve_api = not args.no_api and not args.once
     started_at = utcnow()
     stop = threading.Event()
+    if args.ask and not args.once:
+        log.warning("--ask yalnızca --once ile çalışır; sürekli modda soru yok sayılıyor (POST /ask kullanın)")
 
     llm = build_llm(settings, fake=args.fake_llm, fallback=True)
     try:
@@ -889,6 +913,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     ),
                     periodic=periodic,
                     started_at=started_at,
+                    llm=llm,
+                    question=args.ask,
                 )
 
             workers: tuple[tuple[str, Broker, str, Handler, int], ...] = (
@@ -936,6 +962,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     alarms=top_alarms(store, started_at),
                     dead_letters=None,
                 )
+                if args.ask and not print_ask_answer(settings, store, llm, args.ask):
+                    exit_code = 1
             else:
 
                 def scrape_forever() -> None:
@@ -1068,6 +1096,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_IDLE_EXIT_SECONDS,
         metavar="SN",
         help="--once ile RabbitMQ modunda: kuyruklar bu kadar saniye boş kalınca çık",
+    )
+    p.add_argument(
+        "--ask",
+        default=None,
+        metavar="SORU",
+        help="--once ile: boru hattı bitince aynı süreçteki depo üzerinde RAG sorusunu yanıtla ve yazdır",
     )
     p.set_defaults(func=cmd_run_all)
     return parser

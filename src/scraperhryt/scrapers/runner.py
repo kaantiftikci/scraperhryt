@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -119,7 +120,9 @@ class ScrapeRunner:
     - ``SeenStore`` sayesinde son 6 saatte görülüp besleme damgası (RSS modified/pubDate) değişmeyen bağlantılar
       hiç çekilmez;
       çekilenlerde içerik özeti aynıysa yayınlanmaz, değiştiyse (güncellenen haber) aynı id ile yeniden yayınlanır.
-    - ``settings.max_articles_per_run`` tur başına toplam sayfa çekme bütçesidir (tüm kaynaklar için ortak).
+    - ``settings.max_articles_per_run`` tur başına toplam sayfa çekme bütçesidir. Bütçe kaynaklar arasında adil
+      paylaştırılır: her kaynak en fazla ``ceil(kalan bütçe / kalan kaynak sayısı)`` sayfa çeker, kullanılmayan pay
+      sonraki kaynağa devreder (böylece küçük bütçede ikinci kaynak aç kalmaz).
     - Haber başına hatalar sayılır ve tur devam eder; broker hataları turu keser (``run_forever`` yakalar).
     """
 
@@ -152,12 +155,15 @@ class ScrapeRunner:
         days = self.settings.backfill_days if backfill_days is None else max(0, int(backfill_days))
         budget = max(0, int(self.settings.max_articles_per_run))
         attempts = 0
-        for source in self.sources:
+        for index, source in enumerate(self.sources):
             source_stats = stats.source(source.name)
-            if attempts >= budget:
+            remaining_sources = len(self.sources) - index
+            quota = math.ceil((budget - attempts) / remaining_sources) if budget > attempts else 0
+            if quota <= 0:
                 log.warning("Haber bütçesi (%d) doldu; %s bu turda taranmadı", budget, source.name)
                 stats.budget_exhausted = True
                 continue
+            source_attempts = 0
             try:
                 links = source.discover(self.client, backfill_days=days)
             except Exception:
@@ -167,8 +173,14 @@ class ScrapeRunner:
             source_stats.discovered = len(links)
             log.info("%s: %d bağlantı keşfedildi", source.name, len(links))
             for link in links:
-                if attempts >= budget:
-                    log.warning("Haber bütçesi (%d) doldu; %s için kalan bağlantılar sonraki tura kaldı", budget, source.name)
+                if source_attempts >= quota:
+                    log.warning(
+                        "Haber bütçesi (%d, %s payı %d) doldu; %s için kalan bağlantılar sonraki tura kaldı",
+                        budget,
+                        source.name,
+                        quota,
+                        source.name,
+                    )
                     stats.budget_exhausted = True
                     break
                 feed_stamp = link.updated_hint or link.published_hint
@@ -176,6 +188,7 @@ class ScrapeRunner:
                     source_stats.unchanged += 1
                     continue
                 attempts += 1
+                source_attempts += 1
                 self._process_link(source, link, source_stats, feed_stamp)
         stats.finished_at = utcnow()
         return stats

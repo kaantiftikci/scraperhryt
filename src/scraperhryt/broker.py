@@ -346,11 +346,11 @@ class RabbitMQBroker:
                 ch.basic_qos(prefetch_count=prefetch or self.settings.rabbitmq_prefetch)
                 counter = {"n": 0}
 
-                def on_message(channel, method, properties, body, _queue=queue, _counter=counter):
+                def on_message(channel, method, properties, body, _queue=queue, _counter=counter, _done=processed):
                     msg = self._to_message(_queue, method, properties, body)
                     self._handle(channel, method, properties, body, msg, handler)
                     _counter["n"] += 1
-                    if max_messages is not None and processed + _counter["n"] >= max_messages:
+                    if max_messages is not None and _done + _counter["n"] >= max_messages:
                         stop_event.set()
 
                 tag = ch.basic_consume(queue=queue, on_message_callback=on_message, auto_ack=False)

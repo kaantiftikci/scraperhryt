@@ -131,10 +131,15 @@ Altyapısız deneme (RabbitMQ, Elasticsearch ve Ollama **olmadan**; siteler ger�
 
 ```bash
 scraperhryt run-all --once --in-memory --fake-llm
+# aynı çalıştırmanın sonunda bellek içi depoya soru da sorulabilir:
+scraperhryt run-all --once --in-memory --fake-llm --ask "Fon soruşturmasında son durum ne?"
 ```
 
 `--in-memory` bellek içi broker ve depo kullanır (veri süreç bitince kaybolur), `--fake-llm` Ollama yerine
 deterministik `HeuristicLLM`'i (anahtar kelime/risk terimi sayımına dayalı skor) kullanır, `--once` tek tur çalışıp çıkar.
+`--ask` boru hattı bittikten sonra aynı süreçteki depo üzerinde RAG sorusunu yanıtlar (bellek içi depo başka bir
+süreçten erişilemediği için `scraperhryt ask` burada kullanılamaz). Küçük denemelerde `MAX_ARTICLES_PER_RUN=40` gibi
+bir bütçe verin; bütçe kaynaklar arasında eşit paylaşılır (20 Hürriyet + 20 12punto).
 
 ---
 
@@ -142,16 +147,17 @@ deterministik `HeuristicLLM`'i (anahtar kelime/risk terimi sayımına dayalı sk
 
 | Komut | Açıklama |
 |-------|----------|
-| `scraperhryt setup` | Veri dizinlerini, RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur, Ollama'da `OLLAMA_MODEL`'in yüklü olduğunu denetler. Tekrar çalıştırmak güvenlidir; compose yığınında `setup` servisi olarak otomatik çalışır. |
-| `scraperhryt check` | RabbitMQ, Elasticsearch ve Ollama erişilebilirliğini ve `OLLAMA_MODEL`'in yüklü olup olmadığını denetler. |
-| `scraperhryt scrape [--once] [--source X] [--backfill-days N]` | Kazıyıcı. `--once` tek tur; `--source hurriyet` veya `--source 12punto` tek kaynak; `--backfill-days N` 12punto arşivini N gün geriye tarar. |
+| `scraperhryt [--log-level SEVIYE] [--version] <komut>` | Genel seçenekler: `--log-level` `LOG_LEVEL`'i geçersiz kılar (DEBUG/INFO/WARNING/ERROR), `--version` sürümü yazdırır. |
+| `scraperhryt setup` | Veri dizinlerini, RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur, Ollama'da `OLLAMA_MODEL`'in yüklü olduğunu denetler (Ollama sorunu uyarıdır, çıkış kodu 0). Tekrar çalıştırmak güvenlidir; compose yığınında `setup` servisi olarak otomatik çalışır. |
+| `scraperhryt check [--timeout SN] [--ollama-optional]` | RabbitMQ, Elasticsearch ve Ollama erişilebilirliğini (gecikmelerle) ve `OLLAMA_MODEL`'in yüklü olup olmadığını denetler. `--timeout` servis başına zaman aşımı (varsayılan 5 s); `--ollama-optional` ile Ollama sorunu çıkış kodunu bozmaz. |
+| `scraperhryt scrape [--once] [--source X] [--backfill-days N] [--interval SN]` | Kazıyıcı. `--once` tek tur; `--source hurriyet` veya `--source 12punto` tek kaynak; `--backfill-days N` 12punto arşivini N gün geriye tarar; `--interval` turlar arası bekleme (`SCRAPE_INTERVAL_SECONDS`). |
 | `scraperhryt filter` | `q.articles.raw` tüketicisi: anahtar kelime filtresi. |
 | `scraperhryt score [--fake-llm]` | `q.articles.keyword` tüketicisi: Ollama ile skorlama; `--fake-llm` Ollama yerine sezgisel değerlendirici. |
 | `scraperhryt alarm` | `q.articles.scored` tüketicisi: ES'e yazma, alarm üretme, kanallar, `q.alarms`. |
-| `scraperhryt report` | `q.alarms` tüketicisi (alarm özetleri) + periyodik rapor üretici. |
-| `scraperhryt api` | HTTP API ve pano (`API_HOST:API_PORT`). |
-| `scraperhryt ask "soru"` | RAG soru-cevap: son haberlerden kaynak atıflı Türkçe yanıt üretir. |
-| `scraperhryt run-all [--once] [--in-memory] [--fake-llm]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). `--once`: kazıyıcı tek tur çalışır, kuyruklar boşalınca özet yazdırıp çıkar (API başlatılmaz). SIGINT/SIGTERM ile düzgün kapanır. |
+| `scraperhryt report [--once] [--fake-llm]` | `q.alarms` tüketicisi (alarm özetleri) + periyodik rapor üretici. `--once` tek periyodik rapor üretir, yazdırır ve çıkar. |
+| `scraperhryt api [--host ADRES] [--port PORT] [--fake-llm]` | HTTP API ve pano (varsayılan `API_HOST:API_PORT`). |
+| `scraperhryt ask "soru" [--since-days N] [--top-k N] [--json] [--fake-llm]` | RAG soru-cevap: son haberlerden kaynak atıflı Türkçe yanıt üretir. `--since-days` yalnızca son N gün (`RAG_RECENCY_DAYS`); `--top-k` bağlama alınacak haber sayısı (`RAG_TOP_K`); `--json` `Answer` nesnesini JSON yazdırır. |
+| `scraperhryt run-all [--once] [--in-memory] [--fake-llm] [--no-api] [--backfill-days N] [--idle-timeout SN] [--ask "soru"]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). `--once`: kazıyıcı tek tur çalışır, kuyruklar boşalınca özet yazdırıp çıkar (API başlatılmaz); RabbitMQ modunda kuyruklar `--idle-timeout` saniye (varsayılan 30) boş kalınca çıkar. `--no-api` sürekli modda API'yi başlatmaz. `--ask "soru"`: `--once` ile boru hattı bitince aynı süreçteki depo üzerinde RAG sorusunu yanıtlayıp yazdırır (bellek içi depoda tek yol; `--fake-llm` ile yanıt haberlerden derlenen özetleyici geri dönüştür). SIGINT/SIGTERM ile düzgün kapanır. |
 
 ---
 
@@ -221,7 +227,7 @@ Tümü `.env` dosyasından ya da ortamdan okunur (önek yok, büyük/küçük ha
 | `USER_AGENT` | `Mozilla/5.0 … scraperhryt/0.1` | HTTP User-Agent; proje adını içerir. |
 | `STATE_DB_PATH` | `data/state.sqlite3` | Görülen haberlerin SQLite kaydı (yinelenen yayını önler, güncellenen haberi yakalar). |
 | `BACKFILL_DAYS` | `0` | >0 ise 12punto arşiv aramasıyla bu kadar gün geriye dönük tarama. |
-| `MAX_ARTICLES_PER_RUN` | `400` | Tur başına toplam sayfa çekme bütçesi (tüm kaynaklar için ortak). |
+| `MAX_ARTICLES_PER_RUN` | `400` | Tur başına toplam sayfa çekme bütçesi. Kaynaklar arasında adil paylaşılır (her kaynak en fazla `ceil(kalan bütçe / kalan kaynak)`; kullanılmayan pay sonraki kaynağa devreder). |
 | `HURRIYET_GUNDEM_RSS` | `https://www.hurriyet.com.tr/rss/gundem` | Hürriyet Gündem RSS adresi. |
 | `HURRIYET_GUNDEM_LISTING` | `https://www.hurriyet.com.tr/gundem/` | Hürriyet Gündem liste sayfası. |
 | `PUNTO_BASE_URL` | `https://12punto.com.tr` | 12punto gerçek alan adı. |
@@ -460,6 +466,10 @@ Komut satırından:
 
 ```bash
 scraperhryt ask "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?"
+scraperhryt ask "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" --since-days 7 --json
+make ask Q="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?"
+# altyapısız: kazı + boru hattı + soru aynı süreçte
+scraperhryt run-all --once --in-memory --fake-llm --ask "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?"
 ```
 
 HTTP API'den (`since_days` ve `top_k` isteğe bağlıdır; varsayılanlar `RAG_RECENCY_DAYS` ve `RAG_TOP_K`):

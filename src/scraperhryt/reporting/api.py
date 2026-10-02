@@ -1,0 +1,465 @@
+"""FastAPI uygulaması: arama, alarmlar, raporlar, istatistik, RAG soru-cevap ve Jinja2 panosu.
+
+``create_app(settings, store, llm, broker=None)`` uygulamayı kurar; CLI ``api`` ve ``run-all`` komutları bunu
+uvicorn ile sunar. Depo/LLM hataları Türkçe ``detail`` alanı taşıyan HTTP 4xx/5xx yanıtlarına çevrilir:
+
+- geçersiz parametre → 400 / 422 (pydantic doğrulaması)
+- bulunamadı → 404
+- Elasticsearch / LLM erişilemiyor → 503; Elasticsearch isteği reddetti / LLM bozuk çıktı → 502
+- beklenmeyen hata → 500 (ayrıntı günlükte)
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Annotated, Any, Literal, TypeVar
+
+from elasticsearch import ApiError as ESApiError
+from elasticsearch import ConnectionError as ESConnectionError
+from elasticsearch import TransportError as ESTransportError
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Path as PathParam
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+
+from .. import __version__
+from ..broker import Broker, Retry, RoutingKey
+from ..config import Settings
+from ..models import Answer, Report, utcnow
+from ..pipeline.llm import LLM, LLMBadOutput, LLMUnavailable
+from ..store import ArticleStore, SearchHit
+from ..textutil import excerpt
+from .builder import ReportBuilder
+from .prompts import (
+    alarm_ratio_text,
+    flat_text,
+    format_tr,
+    kind_label,
+    one_line_reason,
+    parse_datetime,
+    peak_hour,
+    to_aware,
+)
+from .rag import QAEngine, make_snippet
+
+log = logging.getLogger(__name__)
+
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+DASHBOARD_HOURS = 24
+DASHBOARD_ALARMS = 20
+DASHBOARD_REPORTS = 10
+MAX_WINDOW_HOURS = 24 * 366
+MAX_SINCE_DAYS = 3660
+ReportKind = Literal["adhoc", "periodic", "daily"]
+T = TypeVar("T")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# İstek / yanıt modelleri
+# ---------------------------------------------------------------------------------------------------------
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok", "degraded", "unavailable"]
+    store: bool
+    llm: bool
+    model: str
+    model_available: bool
+    broker_configured: bool
+    version: str
+    time: datetime
+
+
+class ArticleHit(BaseModel):
+    id: str
+    title: str
+    subtitle: str = ""
+    content_url: str
+    source: str
+    category: str = ""
+    published_at: datetime | None = None
+    alarm_score: int = 0
+    is_alarm: bool = False
+    alarm_reason: str = ""
+    llm_summary: str = ""
+    matched_keywords: list[str] = Field(default_factory=list)
+    score: float = 0.0
+    snippet: str = ""
+
+
+class SearchResponse(BaseModel):
+    query: str
+    since_days: int | None
+    count: int
+    results: list[ArticleHit]
+
+
+class AlarmsResponse(BaseModel):
+    count: int
+    items: list[dict[str, Any]]
+
+
+class ReportsResponse(BaseModel):
+    count: int
+    items: list[dict[str, Any]]
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=1000, description="Türkçe soru")
+    since_days: int | None = Field(default=None, ge=1, le=MAX_SINCE_DAYS, description="Varsayılan RAG_RECENCY_DAYS")
+    top_k: int | None = Field(default=None, ge=1, le=50, description="Varsayılan RAG_TOP_K")
+    sources: list[str] | None = Field(default=None, description="Kaynak filtresi, örn. ['hurriyet']")
+
+
+class GenerateReportRequest(BaseModel):
+    kind: ReportKind = "adhoc"
+    hours: int | None = Field(default=None, ge=1, le=MAX_WINDOW_HOURS, description="Varsayılan REPORT_WINDOW_HOURS")
+    window_end: datetime | None = Field(default=None, description="Pencere sonu (varsayılan: şimdi)")
+    narrative: bool = Field(default=True, description="False ise LLM çağrılmaz, şablon anlatı üretilir")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Yardımcılar
+# ---------------------------------------------------------------------------------------------------------
+
+
+def score_class(score: Any) -> str:
+    """Pano rozetleri: 80+ kritik, 60+ önemli, 30+ dikkat, altı rutin."""
+    try:
+        value = int(score or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value >= 80:
+        return "critical"
+    if value >= 60:
+        return "important"
+    if value >= 30:
+        return "notable"
+    return "routine"
+
+
+def hit_to_article(hit: SearchHit) -> ArticleHit:
+    doc = hit.doc
+    return ArticleHit(
+        id=str(doc.get("id") or ""),
+        title=flat_text(doc.get("title")),
+        subtitle=flat_text(doc.get("subtitle")),
+        content_url=str(doc.get("content_url") or ""),
+        source=str(doc.get("source") or ""),
+        category=str(doc.get("category") or ""),
+        published_at=parse_datetime(doc.get("published_at")),
+        alarm_score=_as_int(doc.get("alarm_score")),
+        is_alarm=bool(doc.get("is_alarm")),
+        alarm_reason=str(doc.get("alarm_reason") or ""),
+        llm_summary=str(doc.get("llm_summary") or ""),
+        matched_keywords=[str(k) for k in (doc.get("matched_keywords") or [])],
+        score=float(hit.score or 0.0),
+        snippet=make_snippet(doc, hit.highlights),
+    )
+
+
+def parse_sources(value: str | None) -> list[str] | None:
+    items = [part.strip() for part in (value or "").split(",") if part.strip()]
+    return items or None
+
+
+def guarded(what: str, fn: Callable[[], T]) -> T:
+    """Depo/LLM hatalarını Türkçe ayrıntılı HTTP hatalarına çevirir."""
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Geçersiz istek ({what}): {exc}") from exc
+    except Retry as exc:
+        raise HTTPException(status_code=503, detail=f"Depo erişilemiyor ({what}): {exc}") from exc
+    except (ESConnectionError, ESTransportError) as exc:
+        raise HTTPException(status_code=503, detail=f"Elasticsearch erişilemiyor ({what}): {_describe(exc)}") from exc
+    except ESApiError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Elasticsearch isteği başarısız ({what}): {_describe(exc)}"
+        ) from exc
+    except LLMUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"LLM erişilemiyor ({what}): {exc}") from exc
+    except LLMBadOutput as exc:
+        raise HTTPException(status_code=502, detail=f"LLM geçersiz çıktı üretti ({what}): {exc}") from exc
+    except Exception as exc:
+        log.exception("API hatası (%s)", what)
+        raise HTTPException(status_code=500, detail=f"Beklenmeyen hata ({what}): {type(exc).__name__}") from exc
+
+
+def generate_report(
+    builder: ReportBuilder,
+    store: ArticleStore,
+    broker: Broker | None,
+    *,
+    kind: str,
+    hours: int,
+    window_end: datetime | None = None,
+    narrative: bool = True,
+) -> Report:
+    """Raporu kurar, ``news-reports``'a yazar ve ``broker`` verilmişse ``report.generated`` ile yayınlar."""
+    end = to_aware(window_end) if window_end is not None else utcnow()
+    report = builder.build(kind, end - timedelta(hours=hours), end, narrative=narrative)
+    store.index_report(report, refresh=True)
+    if broker is not None:
+        broker.publish(RoutingKey.REPORT_GENERATED, report.to_message())
+        log.info("İsteğe bağlı rapor yayınlandı: %s (%s)", report.report_id, kind)
+    else:
+        log.info("İsteğe bağlı rapor yazıldı (broker yok, yayınlanmadı): %s (%s)", report.report_id, kind)
+    return report
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Uygulama
+# ---------------------------------------------------------------------------------------------------------
+
+
+def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker | None = None) -> FastAPI:
+    app = FastAPI(
+        title="scraperhryt API",
+        version=__version__,
+        description=(
+            "Hürriyet Gündem + 12punto haber izleme boru hattı: arama, alarmlar, raporlar, istatistik ve "
+            "RAG soru-cevap. Pano için `/` adresine gidin."
+        ),
+    )
+    builder = ReportBuilder(settings, store, llm)
+    qa = QAEngine(settings, store, llm)
+    app.state.settings = settings
+    app.state.store = store
+    app.state.llm = llm
+    app.state.broker = broker
+    app.state.builder = builder
+    app.state.qa = qa
+
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.filters["tr_dt"] = format_tr
+    templates.env.filters["score_class"] = score_class
+    templates.env.filters["kind_label"] = kind_label
+
+    # --- sağlık ---
+    @app.get("/health", response_model=HealthResponse, summary="Depo ve LLM sağlık özeti")
+    def health() -> HealthResponse | JSONResponse:
+        store_ok = _safe_bool(store.health, "depo sağlık kontrolü")
+        llm_ok = _safe_bool(llm.health, "LLM sağlık kontrolü")
+        model_ok = llm_ok and _safe_bool(llm.model_available, "LLM model kontrolü")
+        status: Literal["ok", "degraded", "unavailable"]
+        if store_ok and model_ok:
+            status = "ok"
+        elif store_ok:
+            status = "degraded"
+        else:
+            status = "unavailable"
+        body = HealthResponse(
+            status=status,
+            store=store_ok,
+            llm=llm_ok,
+            model=llm.model_name,
+            model_available=model_ok,
+            broker_configured=broker is not None,
+            version=__version__,
+            time=utcnow(),
+        )
+        if not store_ok:
+            return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+        return body
+
+    # --- haberler ---
+    @app.get("/articles/search", response_model=SearchResponse, summary="Türkçe BM25 + yenilik ağırlıklı arama")
+    def search_articles(
+        q: Annotated[str, Query(max_length=500, description="Arama metni; boşsa yalnızca yeniliğe göre sıralanır")] = "",
+        since_days: Annotated[int | None, Query(ge=1, le=MAX_SINCE_DAYS, description="Son N gün")] = None,
+        sources: Annotated[str | None, Query(description="Virgülle ayrılmış kaynaklar: hurriyet,12punto")] = None,
+        only_alarms: Annotated[bool, Query(description="Yalnızca alarm üretmiş haberler")] = False,
+        min_score: Annotated[int | None, Query(ge=0, le=100, description="En düşük alarm skoru")] = None,
+        size: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> SearchResponse:
+        since = utcnow() - timedelta(days=since_days) if since_days else None
+        hits = guarded(
+            "haber arama",
+            lambda: store.search_records(
+                q, since=since, sources=parse_sources(sources), only_alarms=only_alarms, size=size, min_score=min_score
+            ),
+        )
+        results = [hit_to_article(hit) for hit in hits]
+        return SearchResponse(query=q, since_days=since_days, count=len(results), results=results)
+
+    @app.get("/articles/{article_id}", summary="Tek haber (news-articles belgesi)")
+    def get_article(article_id: Annotated[str, PathParam(min_length=1, max_length=128)]) -> dict[str, Any]:
+        doc = guarded("haber okuma", lambda: store.get_record(article_id))
+        if doc is None:
+            raise HTTPException(status_code=404, detail=f"Haber bulunamadı: {article_id}")
+        return doc
+
+    # --- alarmlar ---
+    @app.get("/alarms", response_model=AlarmsResponse, summary="Son alarmlar (news-alarms)")
+    def list_alarms(
+        since_hours: Annotated[int | None, Query(ge=1, le=MAX_WINDOW_HOURS, description="Son N saat")] = None,
+        min_score: Annotated[int | None, Query(ge=0, le=100)] = None,
+        size: Annotated[int, Query(ge=1, le=200)] = 20,
+        include_content: Annotated[bool, Query(description="Haber gövdesini de döndür")] = False,
+    ) -> AlarmsResponse:
+        since = utcnow() - timedelta(hours=since_hours) if since_hours else None
+        fetch = size if min_score is None else max(size * 5, 100)
+        docs = guarded("alarm listesi", lambda: store.recent_alarms(since=since, size=fetch))
+        items: list[dict[str, Any]] = []
+        for doc in docs:
+            if min_score is not None and _as_int(doc.get("alarm_score")) < min_score:
+                continue
+            item = dict(doc)
+            if not include_content:
+                item.pop("content", None)
+            items.append(item)
+            if len(items) >= size:
+                break
+        return AlarmsResponse(count=len(items), items=items)
+
+    # --- raporlar ---
+    @app.get("/reports", response_model=ReportsResponse, summary="Son raporlar (news-reports)")
+    def list_reports(
+        kind: Annotated[str | None, Query(max_length=40, description="periodic | alarm_digest | adhoc")] = None,
+        size: Annotated[int, Query(ge=1, le=100)] = 10,
+    ) -> ReportsResponse:
+        docs = guarded("rapor listesi", lambda: store.list_reports(kind=kind or None, size=size))
+        return ReportsResponse(count=len(docs), items=[dict(doc) for doc in docs])
+
+    @app.post("/reports/generate", response_model=Report, summary="Anında rapor üret, kaydet ve yayınla")
+    def generate(payload: GenerateReportRequest) -> Report:
+        return guarded(
+            "rapor üretme",
+            lambda: generate_report(
+                builder,
+                store,
+                broker,
+                kind=payload.kind,
+                hours=payload.hours or settings.report_window_hours,
+                window_end=payload.window_end,
+                narrative=payload.narrative,
+            ),
+        )
+
+    # --- istatistik ---
+    @app.get("/stats", summary="Pencere istatistikleri (toplam, alarm, dağılımlar, saatlik seri, en yüksek alarmlar)")
+    def stats(hours: Annotated[int, Query(ge=1, le=MAX_WINDOW_HOURS)] = DASHBOARD_HOURS) -> dict[str, Any]:
+        now = utcnow()
+        data = guarded("istatistik", lambda: store.stats(now - timedelta(hours=hours), now))
+        return {"hours": hours, **dict(data)}
+
+    # --- soru-cevap ---
+    @app.post("/ask", response_model=Answer, summary="RAG soru-cevap: en yeni haberlerden atıflı Türkçe yanıt")
+    def ask(payload: AskRequest) -> Answer:
+        return guarded(
+            "soru-cevap",
+            lambda: qa.ask(payload.question, since_days=payload.since_days, top_k=payload.top_k, sources=payload.sources),
+        )
+
+    # --- pano ---
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def dashboard(request: Request) -> HTMLResponse:
+        now = utcnow()
+        since = now - timedelta(hours=DASHBOARD_HOURS)
+        error: str | None = None
+        data: Mapping[str, Any] = {}
+        alarms: list[dict[str, Any]] = []
+        reports: list[dict[str, Any]] = []
+        try:
+            data = store.stats(since, now)
+            alarms = [_alarm_view(doc) for doc in store.recent_alarms(size=DASHBOARD_ALARMS)]
+            reports = [_report_view(doc) for doc in store.list_reports(size=DASHBOARD_REPORTS)]
+        except Exception as exc:
+            log.error("Pano verisi alınamadı: %s", exc)
+            error = f"Veri alınamadı: {type(exc).__name__}: {exc}"
+        context = {
+            "settings": settings,
+            "model": llm.model_name,
+            "hours": DASHBOARD_HOURS,
+            "now": now,
+            "stats": data,
+            "total": _as_int(data.get("total")),
+            "alarm_count": _as_int(data.get("alarms")),
+            "alarm_ratio": alarm_ratio_text(_as_int(data.get("total")), _as_int(data.get("alarms"))),
+            "avg_score": data.get("avg_alarm_score") if _as_int(data.get("alarms")) else None,
+            "peak": peak_hour(data.get("by_hour")),
+            "by_source": _sorted_counts(data.get("by_source")),
+            "by_keyword": _sorted_counts(data.get("by_keyword")),
+            "by_category": _sorted_counts(data.get("by_category")),
+            "alarms": alarms,
+            "reports": reports,
+            "error": error,
+            "version": __version__,
+        }
+        return templates.TemplateResponse(request, "dashboard.html", context)
+
+    return app
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Pano görünümleri
+# ---------------------------------------------------------------------------------------------------------
+
+
+def _alarm_view(doc: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "alarm_id": str(doc.get("alarm_id") or ""),
+        "title": flat_text(doc.get("title")) or "(başlıksız)",
+        "subtitle": flat_text(doc.get("subtitle")),
+        "content_url": str(doc.get("content_url") or ""),
+        "source": str(doc.get("source") or "-"),
+        "alarm_score": _as_int(doc.get("alarm_score")),
+        "reason": one_line_reason(doc, limit=320),
+        "llm_summary": excerpt(flat_text(doc.get("llm_summary")), 400),
+        "published_at": doc.get("published_at"),
+        "raised_at": doc.get("raised_at"),
+        "matched_keywords": [str(k) for k in (doc.get("matched_keywords") or [])],
+        "channels": [str(c) for c in (doc.get("channels_notified") or [])],
+    }
+
+
+def _report_view(doc: Mapping[str, Any]) -> dict[str, Any]:
+    stats = doc.get("stats") if isinstance(doc.get("stats"), Mapping) else {}
+    top = doc.get("top_alarms") if isinstance(doc.get("top_alarms"), list) else []
+    return {
+        "report_id": str(doc.get("report_id") or ""),
+        "kind": str(doc.get("kind") or ""),
+        "window_start": doc.get("window_start"),
+        "window_end": doc.get("window_end"),
+        "generated_at": doc.get("generated_at"),
+        "model": str(doc.get("model") or "-"),
+        "narrative": str(doc.get("narrative") or ""),
+        "total": _as_int(stats.get("total")),
+        "alarms": _as_int(stats.get("alarms")),
+        "top_alarm_count": len(top),
+    }
+
+
+def _sorted_counts(mapping: Any, limit: int = 12) -> list[tuple[str, int]]:
+    if not isinstance(mapping, Mapping):
+        return []
+    items = [(str(k), _as_int(v)) for k, v in mapping.items()]
+    items.sort(key=lambda kv: (-kv[1], kv[0]))
+    return items[:limit]
+
+
+def _safe_bool(fn: Callable[[], bool], what: str) -> bool:
+    try:
+        return bool(fn())
+    except Exception as exc:
+        log.warning("%s başarısız: %s", what, exc)
+        return False
+
+
+def _describe(exc: BaseException) -> str:
+    message = getattr(exc, "message", None)
+    return f"{type(exc).__name__}: {message or exc}"
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

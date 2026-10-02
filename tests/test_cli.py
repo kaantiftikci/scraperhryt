@@ -29,29 +29,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SUBCOMMANDS = ("setup", "check", "scrape", "filter", "score", "alarm", "report", "api", "ask", "run-all")
 APP_SERVICES = ("setup", "scraper", "filter", "scorer", "alarm", "reporter", "api")
 
-INTEGRATION_MODULES = (
-    "scraperhryt.alarm_sinks",
-    "scraperhryt.store",
-    "scraperhryt.pipeline.alarm",
-    "scraperhryt.pipeline.keyword_filter",
-    "scraperhryt.pipeline.scorer",
-    "scraperhryt.scrapers.runner",
-    "scraperhryt.reporting.builder",
-    "scraperhryt.reporting.service",
-)
-
-
-def _importable(name: str) -> bool:
-    try:
-        importlib.import_module(name)
-    except ImportError:
-        return False
-    return True
-
-
-INTEGRATION_READY = all(_importable(name) for name in INTEGRATION_MODULES)
-
-
 def patch_module_attr(monkeypatch: pytest.MonkeyPatch, module_name: str, attr: str, value: Any) -> None:
     """Modül varsa niteliğini değiştirir; henüz yazılmamışsa sys.modules'e sahte bir modül koyar."""
     try:
@@ -400,7 +377,6 @@ class FakeSource:
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.xfail(not INTEGRATION_READY, reason="integration pending", strict=False)
 def test_run_all_once_in_memory_fake_llm(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

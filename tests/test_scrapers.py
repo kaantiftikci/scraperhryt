@@ -783,10 +783,36 @@ def test_runner_with_both_sources_and_graceful_404s(settings: Settings) -> None:
     assert [source.name for source in runner.sources] == ["hurriyet", "12punto"]
     stats = runner.run_once()
     assert stats.published == 12 and stats.budget_exhausted is True
-    assert stats.per_source["hurriyet"].published == 12
-    assert stats.per_source["12punto"].discovered == 0  # bütçe dolduğu için taranmadı
+    # bütçe kaynaklar arasında adil paylaşılır: 12 / 2 kaynak → her biri 6
+    assert stats.per_source["hurriyet"].published == 6
+    assert stats.per_source["12punto"].discovered > 6 and stats.per_source["12punto"].published == 6
     records = [NewsRecord.from_message(msg.body) for msg in broker.drain(Queue.ARTICLES_RAW)]
-    assert {record.source for record in records} == {"hurriyet"}
+    assert {record.source for record in records} == {"hurriyet", "12punto"}
+    runner.close()
+
+
+def test_runner_budget_rolls_over_unused_share(settings: Settings) -> None:
+    """İlk kaynağın kullanmadığı pay ikinci kaynağa devreder (10 bütçe: hurriyet 2 → 12punto 8)."""
+    limited = settings.model_copy(update={"max_articles_per_run": 10})
+    routes = {**hurriyet_routes(settings), **punto_routes(settings)}
+    hurriyet_rss = fixture_bytes("hurriyet_gundem_rss.xml").decode("utf-8", "replace")
+    routes[settings.hurriyet_gundem_listing] = b"<html><body></body></html>"
+    head, *items = hurriyet_rss.split("<item ")
+    routes[settings.hurriyet_gundem_rss] = (head + "<item " + "<item ".join(items[:2]) + "</channel></rss>").encode(
+        "utf-8"
+    )
+
+    def fallback(url: str) -> bytes | None:
+        if url.startswith("https://www.hurriyet.com.tr/gundem/"):
+            return fixture_bytes("hurriyet_article.html")
+        if url.startswith("https://12punto.com.tr/") and "/rss" not in url and url.count("/") >= 4:
+            return fixture_bytes("punto_article.html")
+        return None
+
+    runner = ScrapeRunner(limited, InMemoryBroker(limited), client=FakeHttpClient(routes, fallback=fallback))
+    stats = runner.run_once()
+    assert stats.per_source["hurriyet"].fetched <= 2
+    assert stats.per_source["12punto"].fetched == 10 - stats.per_source["hurriyet"].fetched
     runner.close()
 
 
