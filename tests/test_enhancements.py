@@ -379,3 +379,39 @@ def test_cli_format_answer_hides_sources_by_default() -> None:
     short = format_answer(ans)
     assert "Özet cümle" in short and "https://x/1" not in short and "--sources" in short
     assert "https://x/1" in format_answer(ans, show_sources=True)
+
+
+def test_hallucinated_entities_do_not_filter_out_relevant_news() -> None:
+    from scraperhryt.reporting.rag import RankedDoc, filter_relevant, ground_entities
+
+    question = "TFF ile MHK krizinde son durum ne?"
+    hallucinated = ["Türkiye Finans Kurumu (TFK)", "Milli Halk Bankası (MKB)"]
+    assert ground_entities(question, hallucinated + ["TFF", "MHK"]) == ["TFF", "MHK"]
+    assert ground_entities("Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?", ["Özgür Özel", "Kemal Kılıçdaroğlu", "CHP"]) == ["Özgür Özel", "Kemal Kılıçdaroğlu"]
+
+    def rd(title: str) -> RankedDoc:
+        return RankedDoc(doc={"title": title, "id": title}, score=1.0)
+
+    ranked = [rd("TFF'den Riva'da olağanüstü toplantı kararı"), rd("Dursun Özbek'ten TFF'ye MHK tepkisi"), rd("Malatya'da tefeci operasyonu")]
+    kept = filter_relevant(ranked, terms=["Türkiye Finans Kurumu"], entities=hallucinated, question=question)
+    assert [k.doc["title"] for k in kept] == ["TFF'den Riva'da olağanüstü toplantı kararı", "Dursun Özbek'ten TFF'ye MHK tepkisi"]
+    fon = filter_relevant([rd("Fon soruşturmasında 20 şüpheli tutuklandı"), rd("Telefon dolandırıcıları yakalandı")], terms=[], entities=[], question="Fon soruşturmasında son durum ne?")
+    assert [k.doc["title"] for k in fon] == ["Fon soruşturmasında 20 şüpheli tutuklandı"]
+
+
+def test_qa_engine_drops_hallucinated_entities_end_to_end() -> None:
+    s = settings(rag_recency_days=30)
+    store = InMemoryStore()
+    store.index_record(make_record("TFF'den Riva'da olağanüstü toplantı kararı", "MHK krizi sonrası yönetim toplanıyor", days_ago=0))
+    store.index_record(make_record("Dursun Özbek'ten TFF'ye MHK tepkisi", "Lig başlıyor, ortada MHK yok", days_ago=0.5))
+    store.index_record(make_record("Malatya'da tefeci operasyonu", "13 gözaltı", days_ago=0))
+
+    def responder(system: str, user: str) -> Any:
+        if "search_terms" in system:
+            return {"search_terms": ["TFF", "MHK krizi", "Türkiye Finans Kurumu"], "entities": ["Türkiye Finans Kurumu (TFK)", "Milli Halk Bankası (MKB)"]}
+        return "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]."
+
+    answer = QAEngine(s, store, FakeOllama(responder=responder)).ask("TFF ile MHK krizinde son durum ne?")
+    titles = [c.title for c in answer.sources]
+    assert "Malatya'da tefeci operasyonu" not in titles and len(titles) == 2
+    assert answer.answer.startswith("TFF") and answer.model != "none"

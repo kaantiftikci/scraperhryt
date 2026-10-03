@@ -184,7 +184,7 @@ class QAEngine:
         search_terms = _dedupe(terms + entities)[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
         ranked = self.retrieve(question, queries, since=since, size=size, sources=source_filter)
-        relevant = filter_relevant(ranked, terms=terms, entities=entities)
+        relevant = filter_relevant(ranked, terms=terms, entities=entities, question=question)
         if len(relevant) < len(ranked):
             log.info("İlgisiz %d belge elendi (soru terimleri metinde geçmiyor)", len(ranked) - len(relevant))
         ordered = newest_first(relevant)
@@ -228,6 +228,11 @@ class QAEngine:
             return fallback, []
         terms = _str_list(data.get("search_terms"))
         entities = _str_list(data.get("entities"))
+        # Soruda geçmeyen varlıklar (bağlamsal "CHP" ya da uydurma "Türkiye Finans Kurumu") yalnızca geri getirmede
+        # kullanılır; ilgililik süzgeci sorunun kendisine dayanır (filter_relevant).
+        ungrounded = [e for e in entities if e not in ground_entities(question, entities)]
+        if ungrounded:
+            log.info("Soruda geçmeyen varlık adları yalnızca aramada kullanılacak: %s", ungrounded)
         if not terms and not entities:
             log.info("LLM arama terimi üretmedi; soru sözcükleri kullanılacak")
             return fallback, []
@@ -399,26 +404,79 @@ def key_terms(terms: Sequence[str], entities: Sequence[str]) -> list[str]:
     return out
 
 
-def filter_relevant(ranked: Sequence[RankedDoc], *, terms: Sequence[str], entities: Sequence[str]) -> list[RankedDoc]:
-    """Soru terimlerinden hiçbiri başlık/alt başlık/içerikte geçmeyen belgeleri eler (Türkçe ek toleranslı).
+def _question_words(question: str) -> list[tuple[str, bool]]:
+    """Sorudaki anlamlı sözcükler: (Türkçe küçük harf, kısaltma mı). Durak sözcükler ve 1-2 harfliler atılır;
+    büyük harfli kısaltmalar (TFF, MHK, SPK) 2+ harf olsa da tutulur."""
+    out: list[tuple[str, bool]] = []
+    for raw in re.findall(r"[0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû]+", question or ""):
+        word = tr_lower(raw)
+        acronym = len(raw) >= 2 and raw.isupper()
+        if word in _QUESTION_STOPWORDS or (len(word) < 3 and not acronym):
+            continue
+        if all(word != w for w, _ in out):
+            out.append((word, acronym))
+    return out
 
-    Özel adlar (``entities``) varsa en az bir özel ad eşleşmesi aranır; yoksa herhangi bir anlamlı terim yeter.
-    Terim çıkarılamazsa sıralama olduğu gibi döner.
-    """
-    # Özel adlar bütün ifade olarak aranır ("Kemal Kılıçdaroğlu"); tek kelimeye bölmek "özel", "kemal" gibi
-    # yaygın sözcüklerle ilgisiz haberleri geçirir. Çok kelimeli adın tek başına soyadı da (≥6 harf) kabul edilir.
-    phrases: list[str] = []
+
+def ground_entities(question: str, entities: Sequence[str]) -> list[str]:
+    """Yalnızca sözcükleri soruda geçen varlık adlarını tutar (ek toleranslı: "Kılıçdaroğlu" ↔ "Kılıçdaroğlu'nun")."""
+    qwords = [w for w, _ in _question_words(question)]
+
+    def in_question(word: str) -> bool:
+        return any(q == word or q.startswith(word) or word.startswith(q) for q in qwords if min(len(q), len(word)) >= 3)
+
+    kept: list[str] = []
     for ent in entities:
+        words = [tr_lower(w) for w in re.findall(r"[0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû]+", ent)]
+        words = [w for w in words if w not in _QUESTION_STOPWORDS]
+        if words and all(in_question(w) for w in words):
+            kept.append(ent)
+    return kept
+
+
+def _question_matcher(question: str) -> KeywordMatcher | None:
+    patterns: list[str] = []
+    for word, acronym in _question_words(question):
+        if acronym:
+            patterns.append(word)  # kısaltma: kök + ek ("TFF'den", "MHK'nın")
+            continue
+        patterns.append(word)
+        if len(word) >= 7:
+            # Çekimli soru sözcüğü ("soruşturmasında", "krizinde") haberdeki farklı çekimini de bulsun.
+            patterns.append("~" + word[: len(word) - 3])
+    return KeywordMatcher(patterns) if patterns else None
+
+
+def filter_relevant(
+    ranked: Sequence[RankedDoc], *, terms: Sequence[str], entities: Sequence[str], question: str = ""
+) -> list[RankedDoc]:
+    """Soruyla ilgisiz belgeleri eler (Türkçe ek toleranslı). Ölçüt yalnızca SORUNUN KENDİSİNE dayanır:
+
+    - soruda geçen varlık adları (``ground_entities``) varsa en az biri bütün ifade olarak geçmeli
+      (çok kelimeli adın ≥6 harfli soyadı tek başına da yeter);
+    - yoksa sorunun anlamlı sözcüklerinden (kısaltmalar dahil) en az biri geçmeli.
+
+    LLM'in ürettiği arama terimleri geri getirmede kullanılır ama süzgeçte kullanılmaz: uydurma bir açılım
+    ("Türkiye Finans Kurumu") ilgili haberleri elememeli. ``question`` verilmezse ``terms`` yedek olarak kullanılır.
+    """
+    grounded = ground_entities(question, entities) if question else list(entities)
+    phrases: list[str] = []
+    for ent in grounded:
         words = [w for w in tr_lower(ent).replace("'", " ").split() if w not in _QUESTION_STOPWORDS]
         if not words:
             continue
         phrases.append(" ".join(words))
         if len(words) > 1 and len(words[-1]) >= 6:
             phrases.append(words[-1])
-    all_terms = key_terms(terms, entities)
-    if not (phrases or all_terms):
+    if phrases:
+        matcher: KeywordMatcher | None = KeywordMatcher(phrases)
+    elif question:
+        matcher = _question_matcher(question)
+    else:
+        fallback_terms = key_terms(terms, [])
+        matcher = KeywordMatcher(fallback_terms) if fallback_terms else None
+    if matcher is None:
         return list(ranked)
-    matcher = KeywordMatcher(phrases or all_terms)
     kept: list[RankedDoc] = []
     for item in ranked:
         doc = item.doc
