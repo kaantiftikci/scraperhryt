@@ -183,10 +183,11 @@ class QAEngine:
         terms, entities = self.rewrite_query(question)
         search_terms = _dedupe(terms + entities)[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
-        ranked = self.retrieve(question, queries, since=since, size=size, sources=source_filter)
-        relevant = filter_relevant(ranked, terms=terms, entities=entities, question=question)
-        if len(relevant) < len(ranked):
-            log.info("İlgisiz %d belge elendi (soru terimleri metinde geçmiyor)", len(ranked) - len(relevant))
+        # Süzgeç sonrası top_k dolu kalsın diye iki katı aday getirilir (yeniden yazma terimleri gürültü ekleyebilir).
+        ranked = self.retrieve(question, queries, since=since, size=size * 2, sources=source_filter)
+        relevant = filter_relevant(ranked, terms=terms, entities=entities, question=question)[:size]
+        if len(relevant) < min(size, len(ranked)):
+            log.info("İlgisiz belgeler elendi: %d adaydan %d ilgili haber kaldı", len(ranked), len(relevant))
         ordered = newest_first(relevant)
         blocks, citations = self.build_context(ordered)
         log.info(
@@ -357,6 +358,9 @@ class QAEngine:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return extractive_answer(ordered, citations), FALLBACK_MODEL
         text = _strip_leading_refusal(text)
+        if _looks_like_listing(text) and citations:
+            log.info("Model özet yerine haber listesi üretti; kısa çıkarımsal özet verilecek")
+            return extractive_answer(ordered, citations, reason="model özet yerine haber listesi üretti"), FALLBACK_MODEL
         if _is_refusal(text) and citations:
             # Belgeler ilgililik süzgecinden geçti (soru terimleri metinde var) ama küçük model sentezleyemedi:
             # soruyu yanıtsız bırakmak yerine en yeni ilgili haberlerden çıkarımsal özet ver.
@@ -418,6 +422,37 @@ def _question_words(question: str) -> list[tuple[str, bool]]:
     return out
 
 
+_WORD_RE = re.compile(r"[0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû]+(?:['’][A-Za-zÇĞİÖŞÜçğıöşü]+)?")
+
+
+def question_entities(question: str) -> list[str]:
+    """Sorudaki özel adlar: kısaltmalar (TFF, MHK) ve büyük harfle başlayan ardışık sözcük grupları
+    ("Özgür Özel", "Kemal Kılıçdaroğlu"). Cümle başındaki tek büyük harfli sözcük ("Fon ...") sayılmaz."""
+    tokens = _WORD_RE.findall(question or "")
+    out: list[str] = []
+    group: list[str] = []
+
+    def flush() -> None:
+        if group and (len(group) > 1 or group[0] is not tokens[0]):
+            out.append(" ".join(group))
+        group.clear()
+
+    for raw in tokens:
+        base = re.split(r"['’]", raw)[0]
+        if len(base) >= 2 and base.isupper():
+            flush()
+            out.append(base)
+            continue
+        is_cap = base[:1].isupper() and tr_lower(base) not in _QUESTION_STOPWORDS
+        if is_cap:
+            group.append(base)
+        else:
+            flush()
+    flush()
+    # tek sözcüklük cümle başı grubu (ör. "Fon") elendi; aynı sözcüğü tekrarlama
+    return [e for i, e in enumerate(out) if e not in out[:i]]
+
+
 def ground_entities(question: str, entities: Sequence[str]) -> list[str]:
     """Yalnızca sözcükleri soruda geçen varlık adlarını tutar (ek toleranslı: "Kılıçdaroğlu" ↔ "Kılıçdaroğlu'nun")."""
     qwords = [w for w, _ in _question_words(question)]
@@ -460,6 +495,8 @@ def filter_relevant(
     ("Türkiye Finans Kurumu") ilgili haberleri elememeli. ``question`` verilmezse ``terms`` yedek olarak kullanılır.
     """
     grounded = ground_entities(question, entities) if question else list(entities)
+    if question and not grounded:
+        grounded = question_entities(question)
     phrases: list[str] = []
     for ent in grounded:
         words = [w for w in tr_lower(ent).replace("'", " ").split() if w not in _QUESTION_STOPWORDS]
@@ -468,6 +505,8 @@ def filter_relevant(
         phrases.append(" ".join(words))
         if len(words) > 1 and len(words[-1]) >= 6:
             phrases.append(words[-1])
+        if len(words) == 1 and len(words[0]) <= 4:
+            phrases[-1] = words[0]  # kısa kısaltma (tff, mhk): kök + ek eşleşmesi yeterli
     if phrases:
         matcher: KeywordMatcher | None = KeywordMatcher(phrases)
     elif question:
@@ -489,10 +528,21 @@ def filter_relevant(
 _REFUSAL_PREFIX_RE = re.compile(r"^\s*elimdeki haberlerde bu konuda yeterli bilgi yok\.?\s*", re.IGNORECASE)
 
 
+_REFUSAL_ANY_RE = re.compile(
+    r"(?:sonuç\s*:\s*)?elimdeki haberlerde bu konuda yeterli bilgi yok\.?(?:\s*\([^)]*\))?", re.IGNORECASE
+)
+_LIST_LINE_RE = re.compile(r"^\s*(?:\[\d+\]|[-*•]|\d+[.)])\s+", re.MULTILINE)
+
+
 def _strip_leading_refusal(text: str) -> str:
-    """Küçük modeller bazen önce 'yeterli bilgi yok' deyip ardından özet yazar; başa eklenen ret cümlesi atılır."""
-    stripped = _REFUSAL_PREFIX_RE.sub("", text, count=1).strip()
+    """Küçük modeller bazen 'yeterli bilgi yok' cümlesini özetin başına ya da sonuna ekler; içerik varsa atılır."""
+    stripped = _REFUSAL_ANY_RE.sub("", text).strip()
     return stripped if stripped and stripped != text and len(stripped) > 40 else text
+
+
+def _looks_like_listing(text: str) -> bool:
+    """Yanıt 2-4 cümlelik özet yerine haber haber liste mi (3+ madde/numaralı satır)?"""
+    return len(_LIST_LINE_RE.findall(text)) >= 3
 
 
 def _is_refusal(text: str) -> bool:

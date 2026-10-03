@@ -418,7 +418,8 @@ def test_qa_engine_fuses_knn_results_when_embeddings_enabled(seeded) -> None:
     answer = QAEngine(settings, store, llm).ask(QUESTION, top_k=3)
 
     assert [c[0] for c in llm.calls if c[0] == "embed"] == ["embed"]
-    assert len(store.knn_calls) == 1 and store.knn_calls[0][0] == 3 and store.knn_calls[0][1] is not None
+    # aday havuzu top_k × 2 (süzgeç sonrası top_k dolu kalsın)
+    assert len(store.knn_calls) == 1 and store.knn_calls[0][0] == 6 and store.knn_calls[0][1] is not None
     assert [c.id for c in answer.sources] == [records["newest"].id, records["middle"].id, records["oldest"].id]
     assert all(c.score > 1 / 61 for c in answer.sources)  # her biri en az iki sıralamada yer aldı (RRF)
 

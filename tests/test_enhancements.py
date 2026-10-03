@@ -415,3 +415,36 @@ def test_qa_engine_drops_hallucinated_entities_end_to_end() -> None:
     titles = [c.title for c in answer.sources]
     assert "Malatya'da tefeci operasyonu" not in titles and len(titles) == 2
     assert answer.answer.startswith("TFF") and answer.model != "none"
+
+
+def test_question_entities_heuristic() -> None:
+    from scraperhryt.reporting.rag import question_entities
+
+    assert question_entities("TFF ile MHK krizinde son durum ne?") == ["TFF", "MHK"]
+    assert question_entities("Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?") == ["Özgür Özel", "Kemal Kılıçdaroğlu"]
+    assert question_entities("Fon soruşturmasında son durum ne?") == []
+
+
+def test_generic_question_word_does_not_admit_unrelated_news() -> None:
+    from scraperhryt.reporting.rag import RankedDoc, filter_relevant
+
+    def rd(title: str) -> RankedDoc:
+        return RankedDoc(doc={"title": title, "id": title}, score=1.0)
+
+    ranked = [rd("Türkiye'de 20 milyar dolarlık fon krizi"), rd("Dursun Özbek'ten TFF'ye MHK tepkisi"), rd("TFF'den olağanüstü toplantı")]
+    kept = filter_relevant(ranked, terms=[], entities=["Türkiye Fuarı ve Krizi"], question="TFF ile MHK krizinde son durum ne?")
+    assert [k.doc["title"] for k in kept] == ["Dursun Özbek'ten TFF'ye MHK tepkisi", "TFF'den olağanüstü toplantı"]
+
+
+def test_listing_or_trailing_refusal_output_becomes_short_summary() -> None:
+    s = settings(rag_recency_days=30)
+    store = InMemoryStore()
+    store.index_record(make_record("TFF'den olağanüstü toplantı kararı", "MHK krizi nedeniyle yönetim toplanacak.", days_ago=0))
+    store.index_record(make_record("Dursun Özbek'ten TFF'ye MHK tepkisi", "Lig başlıyor, ortada MHK yok dedi.", days_ago=0.5))
+    store.index_record(make_record("TFF hakem atamalarını erteledi", "MHK üyeleri belirlenemedi.", days_ago=1))
+    listing = "[1] TFF toplanıyor.\n\n[2] Özbek tepki gösterdi.\n\n[3] Atamalar ertelendi.\n\nSonuç: Elimdeki haberlerde bu konuda yeterli bilgi yok."
+    answer = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"search_terms": ["TFF"], "entities": []} if "search_terms" in sy else listing)).ask("TFF ile MHK krizinde son durum ne?")
+    assert answer.model == "fallback" and answer.answer.startswith("Son gelişme (") and "\n[" not in answer.answer
+    trailing = "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]. Sonuç: Elimdeki haberlerde bu konuda yeterli bilgi yok."
+    answer2 = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"search_terms": ["TFF"], "entities": []} if "search_terms" in sy else trailing)).ask("TFF ile MHK krizinde son durum ne?")
+    assert answer2.answer == "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]."
