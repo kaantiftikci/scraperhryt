@@ -1,0 +1,93 @@
+"""Çekilemeyen haberlerin bekleyen listesi, sonraki turda yeniden deneme, tur kaydı ve kazıyıcı durumu."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from scraperhryt.broker import InMemoryBroker, Queue
+from scraperhryt.config import Settings
+from scraperhryt.models import NewsRecord
+from scraperhryt.pipeline.llm import FakeOllama
+from scraperhryt.reporting.api import create_app
+from scraperhryt.scrapers.base import DiscoveredLink, HttpError
+from scraperhryt.scrapers.runner import ScrapeRunner
+from scraperhryt.scrapers.state import SeenStore
+from scraperhryt.scrapers.status import scraper_status
+from scraperhryt.store import InMemoryStore
+
+
+class FlakySource:
+    """İlk turda 2. haberi alamayan, sonraki turda başaran sahte kaynak."""
+
+    name = "hurriyet"
+
+    def __init__(self) -> None:
+        self.fail_once = {"https://www.hurriyet.com.tr/gundem/ikinci-haber-2"}
+
+    def discover(self, client, *, backfill_days=0, limit=None):
+        return [DiscoveredLink(url=f"https://www.hurriyet.com.tr/gundem/{slug}", title_hint=slug) for slug in ("ilk-haber-1", "ikinci-haber-2", "ucuncu-haber-3")]
+
+    def fetch_article(self, client, link):
+        if link.url in self.fail_once:
+            self.fail_once.discard(link.url)
+            raise HttpError(link.url, 503, "geçici hata")
+        return NewsRecord.new(source="hurriyet", content_url=link.url, title=link.title_hint or link.url, content="Bakan açıkladı")
+
+
+def _runner(tmp_path: Path, source, **kw) -> tuple[ScrapeRunner, InMemoryBroker, SeenStore]:
+    settings = Settings(_env_file=None, state_db_path=str(tmp_path / "state.sqlite3"), **kw)
+    broker = InMemoryBroker(settings)
+    seen = SeenStore(settings.state_db_path)
+    return ScrapeRunner(settings, broker, seen_store=seen, sources=[source]), broker, seen
+
+
+def test_failed_fetch_is_retried_next_run(tmp_path: Path) -> None:
+    runner, broker, seen = _runner(tmp_path, FlakySource())
+    first = runner.run_once()
+    assert first.published == 2 and first.errors == 1 and first.pending_after == 1
+    pending = seen.list_pending()
+    assert len(pending) == 1 and pending[0]["url"].endswith("ikinci-haber-2") and pending[0]["attempts"] == 1
+    assert "bekleyen=1" in first.summary()
+    second = runner.run_once()
+    assert second.retried == 1 and second.published == 1 and second.pending_after == 0 and seen.pending_count() == 0
+    assert broker.size(Queue.ARTICLES_RAW) == 3
+    assert seen.last_run()["published"] == 1 and len(seen.recent_runs()) == 2
+
+
+def test_budget_exhaustion_defers_remaining_links(tmp_path: Path) -> None:
+    runner, broker, seen = _runner(tmp_path, FlakySource(), max_articles_per_run=1)
+    stats = runner.run_once()
+    assert stats.budget_exhausted and stats.published == 1 and stats.pending_after == 2
+    reasons = {p["reason"] for p in seen.list_pending()}
+    assert reasons == {"haber bütçesi doldu"} and all(p["attempts"] == 0 for p in seen.list_pending())
+
+
+def test_pending_dropped_after_max_attempts(tmp_path: Path) -> None:
+    from scraperhryt.scrapers.state import MAX_PENDING_ATTEMPTS
+
+    seen = SeenStore(tmp_path / "s.sqlite3")
+    for i in range(MAX_PENDING_ATTEMPTS - 1):
+        assert seen.add_pending(id="x", url="https://e/x", source="12punto", reason="hata") == i + 1
+    assert seen.pending_count() == 1
+    seen.remove_pending("x")
+    assert seen.pending_count() == 0 and seen.get_meta("yok") is None
+    seen.set_meta("k", "v")
+    assert seen.get_meta("k") == "v"
+
+
+def test_scraper_status_and_api(tmp_path: Path) -> None:
+    settings = Settings(_env_file=None, state_db_path=str(tmp_path / "state.sqlite3"))
+    missing = scraper_status(settings)
+    assert missing["available"] is False and "hiç çalışmadı" in missing["warning"]
+    runner, _broker, seen = _runner(tmp_path, FlakySource())
+    runner.run_once()
+    status = scraper_status(settings)
+    assert status["available"] and status["pending_count"] == 1 and "henüz çekilemedi" in status["warning"]
+    assert status["last_run"]["published"] == 2 and status["stale"] is False and status["pending"][0]["attempts"] == 1
+    client = TestClient(create_app(settings, InMemoryStore(), FakeOllama()))
+    body = client.get("/scraper/status").json()
+    assert body["pending_count"] == 1 and body["last_run"]["errors"] == 1
+    page = client.get("/ara")
+    assert page.status_code == 200 and "Haber Radarı" in page.text and "/scraper/status" in page.text

@@ -539,6 +539,12 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         )
 
     # --- pano ---
+    @app.get("/scraper/status", summary="Kazıyıcı durumu: son/sonraki tur, çekilemeyen (bekleyen) haberler, uyarı")
+    def scraper_status_endpoint() -> dict[str, Any]:
+        from ..scrapers.status import scraper_status
+
+        return guarded("kazıyıcı durumu", lambda: scraper_status(settings))
+
     @app.get("/ara", response_class=HTMLResponse, include_in_schema=False)
     def search_page(request: Request) -> HTMLResponse:
         """Arama / soru-cevap / alarm arayüzü (tek sayfa, mevcut JSON uçlarını kullanır)."""

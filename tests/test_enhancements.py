@@ -327,6 +327,6 @@ def test_search_page_renders_and_links() -> None:
     store.index_record(make_record("Fon soruşturması haberi", "içerik", keywords=["fon"]))
     client = TestClient(create_app(s, store, FakeOllama()))
     page = client.get("/ara")
-    assert page.status_code == 200 and "Haber Arama" in page.text and "/articles/search" in page.text
+    assert page.status_code == 200 and "Haber Radarı" in page.text and "/articles/search" in page.text
     assert 'href="/ara"' in client.get("/").text
     assert client.get("/articles/search", params={"q": "fon"}).json()["count"] >= 1  # UI "results" anahtarını okur

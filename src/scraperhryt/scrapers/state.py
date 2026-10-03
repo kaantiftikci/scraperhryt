@@ -29,7 +29,37 @@ CREATE TABLE IF NOT EXISTS seen (
     times_seen    INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS ix_seen_last_seen ON seen(last_seen);
+CREATE TABLE IF NOT EXISTS pending (
+    id            TEXT PRIMARY KEY,
+    url           TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    title         TEXT NOT NULL DEFAULT '',
+    category      TEXT NOT NULL DEFAULT '',
+    published_at  TEXT,
+    reason        TEXT NOT NULL DEFAULT '',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    first_seen    TEXT NOT NULL,
+    last_attempt  TEXT
+);
+CREATE TABLE IF NOT EXISTS runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at       TEXT NOT NULL,
+    finished_at      TEXT,
+    discovered       INTEGER NOT NULL DEFAULT 0,
+    fetched          INTEGER NOT NULL DEFAULT 0,
+    published        INTEGER NOT NULL DEFAULT 0,
+    unchanged        INTEGER NOT NULL DEFAULT 0,
+    errors           INTEGER NOT NULL DEFAULT 0,
+    retried          INTEGER NOT NULL DEFAULT 0,
+    pending_after    INTEGER NOT NULL DEFAULT 0,
+    budget_exhausted INTEGER NOT NULL DEFAULT 0,
+    interrupted      INTEGER NOT NULL DEFAULT 0,
+    summary          TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+MAX_PENDING_ATTEMPTS = 5  # bu kadar denemeden sonra bekleyen bağlantı listeden düşer
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -140,6 +170,86 @@ class SeenStore:
                 """,
                 (record.id, record.content_url, record.content_hash or "", published, now, now),
             )
+
+    # --- bekleyen (çekilemeyen) bağlantılar ---
+    def add_pending(
+        self,
+        *,
+        id: str,
+        url: str,
+        source: str,
+        reason: str,
+        title: str = "",
+        category: str = "",
+        published_at: datetime | None = None,
+        count_attempt: bool = True,
+    ) -> int:
+        """Çekilemeyen bağlantıyı bekleyen listesine ekler/günceller; deneme sayısını döndürür."""
+        now = utcnow().isoformat()
+        with self._lock:
+            row = self._conn.execute("SELECT attempts FROM pending WHERE id = ?", (id,)).fetchone()
+            attempts = (int(row["attempts"]) if row else 0) + (1 if count_attempt else 0)
+            self._conn.execute(
+                """INSERT INTO pending (id, url, source, title, category, published_at, reason, attempts, first_seen, last_attempt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET reason = excluded.reason, attempts = excluded.attempts,
+                       last_attempt = excluded.last_attempt, title = CASE WHEN excluded.title != '' THEN excluded.title ELSE pending.title END""",
+                (id, url, source, title, category, published_at.isoformat() if published_at else None, reason[:300], attempts, now, now if count_attempt else None),
+            )
+        return attempts
+
+    def remove_pending(self, record_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM pending WHERE id = ?", (record_id,))
+
+    def list_pending(self, source: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM pending" + (" WHERE source = ?" if source else "") + " ORDER BY attempts ASC, first_seen ASC"
+        params: tuple[Any, ...] = (source,) if source else ()
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return int(self._conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+
+    # --- tur kayıtları / meta ---
+    def record_run(self, stats: Any) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO runs (started_at, finished_at, discovered, fetched, published, unchanged, errors, retried,
+                                     pending_after, budget_exhausted, interrupted, summary)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    stats.started_at.isoformat(),
+                    (stats.finished_at or utcnow()).isoformat(),
+                    stats.discovered, stats.fetched, stats.published, stats.unchanged, stats.errors,
+                    getattr(stats, "retried", 0), getattr(stats, "pending_after", 0),
+                    int(bool(stats.budget_exhausted)), int(bool(stats.interrupted)), stats.summary(),
+                ),
+            )
+            self._conn.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY id DESC LIMIT 200)")
+
+    def last_run(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
 
     def close(self) -> None:
         with self._lock:
