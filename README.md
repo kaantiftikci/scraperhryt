@@ -576,3 +576,10 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 | Ölü mektup geri oynatma | `scraperhryt replay-dead-letters [--dry-run] [--limit N] [--to KUYRUK]` | `q.dead_letter` mesajları köken kuyruğuna (`x-origin-queue` / `x-death`) geri yazılır |
 
 Önerilen üretim profili: `OLLAMA_MODEL=qwen2.5:7b` (veya daha büyük), `LLM_SAMPLES=3`, `OLLAMA_EMBEDDING_MODEL=nomic-embed-text`, `ALARM_DEDUP_ENABLED=true`, düzenli `scraperhryt calibrate --from-feedback` ile eşik gözden geçirme.
+
+## Soru-cevap: tam metin özet ve sayı doğrulama
+
+- **Haberin tamamı okunur:** Soruya göre her haberin tüm metni taranır. Modele yalnızca başlık ya da ilk paragraf değil, soruyla en ilgili cümleler verilir (ilk iki cümle bağlam olarak her zaman eklenir).
+- **Model cevap veremezse:** Yedek özet de haberin kendi metninden üretilir. Konunun kendisi olan haberlerde alt başlık ve ilk cümleler öne çıkar. Adın yalnızca metnin içinde geçtiği haberlerde ise o adı içeren cümleler seçilir. Her habere önce bir cümle düşer, böylece farklı gelişmeler kapsanır. Skorlama aşamasındaki LLM özetleri kullanılmaz.
+- **İlgililik:** Sorudaki özel adlar ve kısaltmalar (TFF, MHK) zorunludur. Unvanlı adlar ("Bakan Fidan") ada indirgenir. Cümle başındaki ad ("Erdoğan ne dedi?") haberlerdeki kullanımına bakılarak özel ad olarak tanınır. "fiyat", "zam", "kriz" gibi genel sözcükler tek başına bir haberi ilgili saymaz. Hafif bir Türkçe kök bulucu çekimleri eşler ("tutuklamalarında" ile "tutuklandı").
+- **Sayı doğrulama:** Cevaptaki ve alarm özetlerindeki her sayı, büyüklüğüyle birlikte (bin, milyon, milyar) kaynak haberde aranır. Kaynakta karşılığı olmayan sayıyı içeren cümle atılır; örneğin haberde "20 milyar" yazarken model "20 milyon" yazarsa. Yazıyla yazılmış sayılar ("beşinci dalga") tanınır. Tarih ve saatler bu denetimin dışındadır.

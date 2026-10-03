@@ -160,3 +160,45 @@ class KeywordMatcher:
 def excerpt(text: str, limit: int = 300) -> str:
     text = normalize_ws(text).replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+# --- Türkçe cümle bölme ---------------------------------------------------------------------------------------
+
+# Nokta ile biten ama cümle sonu olmayan kısaltmalar (küçük harfe çevrilmiş, noktasız).
+ABBREVIATIONS = frozenset(
+    "dr av prof doç doc yrd op uzm öğr ogr arş ars gör gor vb vs bkz st no nr ltd şti sti a.ş a.s t.c "
+    "md mah cad sok apt blv bul tel fax yy örn orn mr mrs ms jr sr".split()
+)
+_BOUNDARY_RE = re.compile(r"[.!?…](?:\s*\[\d+\])*\.?(?=\s|$)")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Türkçe haber metnini cümlelere böler. Kısaltmalarda ("Dr.", "Av.", "A.Ş."), tek harfli baş harflerde
+    ("M. Kaya") ve sıra sayılarında ("8. haftasında", "39. Olağan Kurultay") bölmez; atıf numaraları ("[1]")
+    cümlenin sonunda kalır."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return []
+    sentences: list[str] = []
+    start = 0
+    for match in _BOUNDARY_RE.finditer(text):
+        end = match.end()
+        dot = match.start()
+        if text[dot] == ".":
+            token = re.search(r"([0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû.]+)$", text[start:dot])
+            word = token.group(1) if token else ""
+            rest = text[end:].lstrip()
+            if word.isdigit() and rest and not rest.startswith("["):
+                continue  # sıra sayısı: "8. hafta", "39. Olağan"
+            if len(word) == 1 and word.isalpha() and word.isupper():
+                continue  # baş harf: "M. Kaya"
+            if tr_lower(word).strip(".") in ABBREVIATIONS:
+                continue
+        piece = text[start:end].strip()
+        if piece:
+            sentences.append(piece)
+        start = end
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences

@@ -27,8 +27,9 @@ from pydantic import ValidationError
 
 from ..broker import Broker, Message, Queue, Reject, Retry, RoutingKey, Unavailable, attempt_limit_for
 from ..config import Settings
+from ..grounding import SourceFigures, ground_text
 from ..models import LLMVerdict, NewsRecord
-from ..textutil import excerpt, normalize_ws, tr_fold, tr_lower
+from ..textutil import excerpt, normalize_ws, split_sentences, tr_fold, tr_lower
 from .llm import LLM, HeuristicLLM, LLMBadOutput, LLMUnavailable, redact_url
 from .prompts import STRICT_JSON_REMINDER, TOPICS, build_system_prompt, build_user_prompt
 from .thresholds import resolve_threshold
@@ -399,6 +400,28 @@ class ScoringService:
             )
         return record
 
+    def _ground_verdict(self, record: NewsRecord, verdict: LLMVerdict) -> LLMVerdict:
+        """LLM özeti ve gerekçesindeki sayılar haberin kendi metninde geçmeli; geçmeyen cümleler atılır.
+
+        Özet tamamen boşalırsa haberin kendi alt başlığı/ilk cümleleri (gazeteci metni) özet olarak kullanılır;
+        böylece alarm gerekçesine "20 milyar" yerine uydurma "20 milyon" gibi bir sayı girmez.
+        """
+        # Yalnızca özet denetlenir: gerekçe skoru/eşiği anabilir ("skor 85"), bunlar haber olgusu değildir.
+        sources = SourceFigures(record.title, record.subtitle, record.content)
+        summary, dropped = ground_text(verdict.summary, sources)
+        if not dropped:
+            return verdict
+        log.warning(
+            "LLM özetinde haberde geçmeyen sayı(lar) çıkarıldı [%s] %s: %s",
+            record.source,
+            excerpt(record.title, 70),
+            dropped,
+        )
+        if not summary.strip():
+            lead = split_sentences(record.subtitle) or split_sentences(record.content)
+            summary = " ".join(lead[:2])
+        return verdict.model_copy(update={"summary": summary.strip()})
+
     def _verdict_sampled(self, record: NewsRecord, system: str, user: str, samples: int) -> LLMVerdict:
         verdicts: list[LLMVerdict] = []
         for i in range(samples):
@@ -472,7 +495,7 @@ class ScoringService:
                 prompt = user + STRICT_JSON_REMINDER
                 continue
             verdict.samples = [verdict.alarm_score]
-            return verdict
+            return self._ground_verdict(record, verdict)
         self.stats.exhausted += 1
         raise Retry(f"LLM {MAX_LLM_ATTEMPTS} denemede geçerli karar üretemedi: {last_error}") from last_error
 
