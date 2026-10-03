@@ -448,3 +448,18 @@ def test_listing_or_trailing_refusal_output_becomes_short_summary() -> None:
     trailing = "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]. Sonuç: Elimdeki haberlerde bu konuda yeterli bilgi yok."
     answer2 = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"search_terms": ["TFF"], "entities": []} if "search_terms" in sy else trailing)).ask("TFF ile MHK krizinde son durum ne?")
     assert answer2.answer == "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]."
+
+
+def test_condense_answer_drops_labels_duplicates_and_caps_length() -> None:
+    from scraperhryt.reporting.rag import condense_answer
+
+    raw = (
+        "En güncel gelişmeler: TFF Yönetim Kurulu olağanüstü toplanacak [1].\n\nÖzet:\n\n"
+        "TFF Yönetim Kurulu olağanüstü toplanacak [1]. Toplantı 6 Ekim'de Riva'da yapılacak [1]. "
+        "MHK Başkanı soruşturma kapsamında ifade verdi [2]. Dursun Özbek ortada MHK olmadığını söyledi [3]. "
+        "Lig bir hafta sonra başlayacak [3]."
+    )
+    out = condense_answer(raw)
+    assert out.startswith("TFF Yönetim Kurulu olağanüstü toplanacak [1].") and "Özet" not in out and "En güncel" not in out
+    assert out.count("olağanüstü toplanacak") == 1 and out.count("[") == 4 and "Lig bir hafta" not in out
+    assert condense_answer("Tek cümle [1].") == "Tek cümle [1]."

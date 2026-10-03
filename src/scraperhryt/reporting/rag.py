@@ -367,7 +367,7 @@ class QAEngine:
             # soruyu yanıtsız bırakmak yerine en yeni ilgili haberlerden çıkarımsal özet ver.
             log.info("Model 'yeterli bilgi yok' dedi ama %d ilgili haber var; çıkarımsal özet verilecek", len(citations))
             return extractive_answer(ordered, citations, reason="model ilgili haberleri sentezleyemedi"), FALLBACK_MODEL
-        return text, self.llm.model_name
+        return condense_answer(text), self.llm.model_name
 
 
 def build_timeline(citations: Sequence[Citation]) -> list[TimelineItem]:
@@ -539,6 +539,36 @@ def _strip_leading_refusal(text: str) -> str:
     """Küçük modeller bazen 'yeterli bilgi yok' cümlesini özetin başına ya da sonuna ekler; içerik varsa atılır."""
     stripped = _REFUSAL_ANY_RE.sub("", text).strip()
     return stripped if stripped and stripped != text and len(stripped) > 40 else text
+
+
+MAX_ANSWER_SENTENCES = 4
+_LABEL_RE = re.compile(
+    r"^\s*(?:özet|sonuç|en güncel gelişme(?:ler)?|yanıt|cevap)\s*:\s*", re.IGNORECASE
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s*\[\d+\](?:\[\d+\])*\.?)?\s+|\n+")
+
+
+def condense_answer(text: str, max_sentences: int = MAX_ANSWER_SENTENCES) -> str:
+    """Model yanıtını kısa tek paragrafa indirger: "Özet:" gibi etiketleri atar, tekrarlanan cümleleri eler,
+    en fazla ``max_sentences`` cümle tutar (atıf numaraları cümleyle birlikte kalır)."""
+    pieces: list[str] = []
+    for match in re.finditer(r".+?(?:[.!?](?:\s*\[\d+\])*\.?|$)(?=\s|$)", text.replace("\n", " ")):
+        sentence = _LABEL_RE.sub("", match.group(0)).strip()
+        if len(sentence) < 3:
+            continue
+        pieces.append(sentence)
+    kept: list[str] = []
+    seen: list[str] = []
+    for sentence in pieces:
+        key = tr_lower(re.sub(r"\[\d+\]", "", sentence))
+        key = re.sub(r"\W+", " ", key).strip()
+        if not key or any(key[:70] == other[:70] or key in other or other in key for other in seen):
+            continue
+        seen.append(key)
+        kept.append(sentence)
+        if len(kept) >= max_sentences:
+            break
+    return " ".join(kept) if kept else text.strip()
 
 
 def _looks_like_listing(text: str) -> bool:
