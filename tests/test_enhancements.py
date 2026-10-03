@@ -246,3 +246,76 @@ def test_feedback_model_roundtrip_in_store() -> None:
 
     with pytest.raises(ValidationError):
         Feedback(feedback_id="f2", alarm_id="a1", label="true_positive", created_at="bozuk")  # type: ignore[arg-type]
+
+
+# ---- ön sınıflandırıcı ----
+from scraperhryt.pipeline.preclassifier import Preclassifier, is_verbal_bakan, rule_based_reason  # noqa: E402
+from scraperhryt.textutil import KeywordMatcher  # noqa: E402
+
+_REL_WORDS = ("bakan", "bakanı", "bakanlığı", "cumhurbaşkanı", "soruşturma", "fon", "spk", "kararname", "operasyon", "açıkladı", "düzenleme")
+_IRR_WORDS = ("pencereden", "adam", "mikrofon", "konser", "maç", "takım", "hava", "sıcaklık", "dizi", "tarif", "kedi", "otel")
+
+
+class _VecEmbedder:
+    """Deterministik sahte embedding: [ilgili kelime sayısı, ilgisiz kelime sayısı, 1]."""
+
+    calls = 0
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        type(self).calls += 1
+        out = []
+        for t in texts:
+            low = t.lower()
+            out.append([1.0 + sum(low.count(w) for w in _REL_WORDS), 1.0 + sum(low.count(w) for w in _IRR_WORDS), 1.0])
+        return out
+
+
+def test_rule_based_bakan_verb_detection() -> None:
+    m = KeywordMatcher(["bakan"])
+    verb = "Pencereden bakan adam komşusunun evindeki yangını fark etti."
+    assert rule_based_reason(verb, m.find(verb)).startswith("kural:")
+    for text in (
+        "İçişleri Bakanı Yerlikaya açıklama yaptı",
+        "Eski bakan Nihat Zeybekci ifade verdi",
+        "Bakan: Asgari ücret görüşmeleri başlıyor",
+        "Hazine ve Maliye Bakanlığı bütçeyi açıkladı",
+    ):
+        assert rule_based_reason(text, m.find(text)) == "", text
+    assert is_verbal_bakan("gözlerine", "çocuk") and not is_verbal_bakan("eski", "Zeybekci")
+
+
+def test_embedding_preclassifier_drops_irrelevant_and_keeps_relevant() -> None:
+    s = settings(preclassifier_enabled=True, preclassifier_threshold=0.05, preclassifier_prototypes_path=str(ROOT / "config" / "preclassifier_prototypes.json"))
+    pre = Preclassifier(s, _VecEmbedder())
+    m = KeywordMatcher(["bakan", "fon"])
+    relevant = "Hazine ve Maliye Bakanı yeni düzenleme açıkladı, SPK fon soruşturması operasyon"
+    irrelevant = "Mikrofon arızası konseri geciktirdi, takım maç hava sıcaklık dizi kedi otel fonu"
+    assert pre.evaluate(relevant, m.find(relevant)).drop is False
+    d = pre.evaluate(irrelevant, m.find(irrelevant))
+    assert d.drop is True and d.method == "embedding" and d.relevance is not None and d.relevance < 0.05
+
+
+def test_filter_prefilters_and_stores_without_llm() -> None:
+    s = settings(keywords="bakan,fon", preclassifier_enabled=True, preclassifier_threshold=0.05, preclassifier_prototypes_path=str(ROOT / "config" / "preclassifier_prototypes.json"))
+    broker = InMemoryBroker(s)
+    svc = KeywordFilterService(s, broker, embedder=_VecEmbedder())
+    verb = NewsRecord.new(source="hurriyet", content_url="https://www.hurriyet.com.tr/gundem/bakan-fiil-9", title="Pencereden bakan adam yangını gördü", content="komşusunun evinden duman yükseldi")
+    real = NewsRecord.new(source="hurriyet", content_url="https://www.hurriyet.com.tr/gundem/bakan-gercek-9", title="İçişleri Bakanı operasyon açıkladı", content="81 ilde soruşturma, kararname ve düzenleme")
+    svc.handle(_msg(verb))
+    svc.handle(_msg(real))
+    dropped = NewsRecord.from_message(broker.drain(Queue.ARTICLES_SCORED)[0].body)
+    kept = NewsRecord.from_message(broker.drain(Queue.ARTICLES_KEYWORD)[0].body)
+    assert dropped.prefilter_reason.startswith("kural:") and dropped.alarm_score == 0 and dropped.matched_keywords == ["bakan"]
+    assert kept.id == real.id and kept.prefilter_reason == "" and kept.relevance is not None
+    assert svc.stats.prefiltered == 1 and svc.stats.hits == 1
+
+
+def test_preclassifier_disabled_or_no_embedder_passes_through() -> None:
+    s = settings(keywords="bakan", preclassifier_enabled=False)
+    broker = InMemoryBroker(s)
+    KeywordFilterService(s, broker).handle(_msg(NewsRecord.new(source="hurriyet", content_url="https://www.hurriyet.com.tr/gundem/x-1", title="Pencereden bakan adam", content="")))
+    assert broker.size(Queue.ARTICLES_KEYWORD) == 1
+    s2 = settings(keywords="fon", preclassifier_enabled=True, preclassifier_prototypes_path="yok.json")
+    broker2 = InMemoryBroker(s2)
+    KeywordFilterService(s2, broker2, embedder=None).handle(_msg(NewsRecord.new(source="hurriyet", content_url="https://www.hurriyet.com.tr/gundem/y-1", title="Fon soruşturması", content="")))
+    assert broker2.size(Queue.ARTICLES_KEYWORD) == 1

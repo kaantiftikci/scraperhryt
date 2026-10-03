@@ -67,7 +67,9 @@ class Settings(BaseSettings):
 
     # ---- Ön sınıflandırıcı (embedding tabanlı ilgililik filtresi; LLM'den önce yanlış pozitifleri eler) ----
     preclassifier_enabled: bool = False
-    preclassifier_threshold: float = 0.35  # relevance (ilgili-merkez benzerliği - ilgisiz-merkez benzerliği) alt sınırı
+    # relevance = cos(metin, ilgili merkez) - cos(metin, ilgisiz merkez); nomic-embed-text ile tipik aralık ±0.05,
+    # bu yüzden varsayılan 0.0 (ilgisiz merkeze daha yakınsa ele). Yükseltmek daha agresif eler.
+    preclassifier_threshold: float = 0.0
     preclassifier_prototypes_path: str = "config/preclassifier_prototypes.json"
 
     # ---- LLM skorlama kalitesi ----

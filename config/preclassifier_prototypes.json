@@ -1,0 +1,31 @@
+{
+  "_açıklama": "Embedding ön sınıflandırıcı için örnek cümleler. Haber metni 'relevant' merkezine 'irrelevant' merkezinden ne kadar yakınsa relevance o kadar yüksek; PRECLASSIFIER_THRESHOLD altı LLM'e gitmeden elenir.",
+  "relevant": [
+    "Hazine ve Maliye Bakanı yeni vergi düzenlemesini ve bütçe hedeflerini açıkladı.",
+    "İçişleri Bakanı 81 ilde düzenlenen operasyonda yüzlerce şüphelinin gözaltına alındığını duyurdu.",
+    "Cumhurbaşkanı Erdoğan kabine toplantısı sonrası faiz ve enflasyon politikasına ilişkin açıklama yaptı.",
+    "Cumhurbaşkanlığı kararnamesiyle bakanlıklarda üst düzey atama ve görevden alma yapıldı.",
+    "Sermaye Piyasası Kurulu fon soruşturması kapsamında portföy yönetim şirketlerine işlem başlattı.",
+    "Fon vurgunu soruşturmasında savcılık 20 şüpheli için tutuklama talep etti.",
+    "Adalet Bakanlığı yargı paketi teklifini Meclis'e sundu, muhalefet tepki gösterdi.",
+    "Eski bakan hakkında rüşvet ve ihaleye fesat iddiasıyla iddianame hazırlandı.",
+    "Bakanlık asgari ücret ve emekli maaşı zammı için komisyonun toplanacağını açıkladı.",
+    "Merkez Bankası ve bakanlık ortak açıklamasıyla döviz piyasasına yönelik tedbirler duyuruldu.",
+    "Cumhurbaşkanı Yardımcısı ekonomi programı ve yatırım fonlarına dair değerlendirme yaptı.",
+    "Dışişleri Bakanlığı yabancı ülke saldırısını kınayan resmi açıklama yayımladı."
+  ],
+  "irrelevant": [
+    "Pencereden bakan adam komşusunun evindeki yangını fark ederek itfaiyeyi aradı.",
+    "Gözlerinin içine bakan çocuk gülümsedi ve annesine koştu.",
+    "Mikrofon arızası nedeniyle konser yarım saat gecikmeli başladı.",
+    "A Milli Takım'ın maçında ilk 11 açıklandı, teknik direktör sürpriz tercihler yaptı.",
+    "Ünlü şarkıcı yeni albümünün çıkış tarihini sosyal medyadan duyurdu.",
+    "Hava sıcaklıkları hafta sonu mevsim normallerinin üzerine çıkacak.",
+    "Telefon dolandırıcıları yaşlı kadını kandırarak parasını aldı.",
+    "Denize bakan odalı otel yaz sezonunda yüzde yüz dolulukla çalışıyor.",
+    "Trafik kazasında iki araç çarpıştı, sürücüler hafif yaralandı.",
+    "Dizinin yeni bölümünde başrol oyuncusu sürpriz bir karakterle karşılaştı.",
+    "Yemek tarifi: fırında sebzeli tavuk nasıl yapılır?",
+    "Kedisine bakan genç kız sokak hayvanları için mama kampanyası başlattı."
+  ]
+}

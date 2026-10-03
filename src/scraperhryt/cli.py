@@ -755,12 +755,15 @@ def cmd_filter(args: argparse.Namespace, settings: Settings) -> int:
     from .pipeline.keyword_filter import KeywordFilterService
 
     broker = make_broker(settings)
+    embedder = build_llm(settings, fake=False, fallback=False) if settings.preclassifier_enabled and settings.ollama_embedding_model else None
     stop = threading.Event()
     try:
         with signal_scope(stop):
-            KeywordFilterService(settings, broker).run(stop_event=stop)
+            KeywordFilterService(settings, broker, embedder=embedder).run(stop_event=stop)
     finally:
         broker.close()
+        if embedder is not None:
+            close_llm(embedder)
     return 0
 
 
@@ -1137,7 +1140,9 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
 
     builder = ReportBuilder(settings, store, llm)
     filter_broker, scorer_broker, alarm_broker, consumer_broker, periodic_broker = (broker_for() for _ in range(5))
-    filter_service = KeywordFilterService(settings, filter_broker)
+    filter_service = KeywordFilterService(
+        settings, filter_broker, embedder=llm if settings.ollama_embedding_model else None
+    )
     # Tüketiciler ``.run()`` yerine ``consume_loop`` ile sürüldüğünden paylaşılan durdurma olayını kurucuda alırlar;
     # aksi halde Ollama/ES kesintisinde ``wait_for_llm`` / ``_prepare_indices`` kendi (hiç set edilmeyen) olayını
     # bekler ve SIGINT/SIGTERM kapanışı join zaman aşımına dek askıda kalırdı.

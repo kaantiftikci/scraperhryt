@@ -565,6 +565,7 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 | Mekanizma | Ayar / Komut | Ne yapar |
 |---|---|---|
 | Eş anlamlı anahtar kelimeler | `KEYWORD_ALIASES_PATH=config/keyword_aliases.json` | "SPK", "Erdoğan", "Hazine ve Maliye Bakanlığı" gibi ifadeler kanonik anahtar kelimeye (`fon`, `cumhurbaşkanı`, `bakan`) katlanır |
+| Ön sınıflandırıcı | `PRECLASSIFIER_ENABLED=true`, `PRECLASSIFIER_THRESHOLD`, `config/preclassifier_prototypes.json` | Kural katmanı "bakan" fiil kullanımını ("pencereden bakan adam") eler; embedding katmanı (OLLAMA_EMBEDDING_MODEL gerekir) metni ilgili/ilgisiz örnek merkezleriyle karşılaştırır, `relevance` eşiğin altındaysa LLM'e gitmeden skor 0 ile depolanır (`prefilter_reason`) |
 | Kaynak/kategori bazlı eşik | `ALARM_THRESHOLDS_JSON={"source:12punto":70,"category:spor":90,"keyword:fon":50}` | Öncelik: kategori > anahtar kelime > kaynak > `ALARM_THRESHOLD`; uygulanan eşik `alarm_threshold_used` alanında |
 | Öz-tutarlılık (çoklu örnekleme) | `LLM_SAMPLES=3`, `LLM_SAMPLE_TEMPERATURE`, `LLM_DISAGREEMENT_THRESHOLD` | Aynı haber N kez puanlanır, medyan alınır; örnekler arası fark eşiği aşarsa `needs_review=true`, `confidence` düşer |
 | Olay kümeleme / tekrar bastırma | `ALARM_DEDUP_*`, `ALARM_NOTIFY_DUPLICATES` | Pencere içindeki benzer alarm (embedding kosinüsü veya başlık Jaccard) aynı `event_id` altında toplanır; tekrar alarm depolanır ve `q.alarms`'a gider ama bildirim kanallarına gitmez (`x-duplicate` başlığı) |

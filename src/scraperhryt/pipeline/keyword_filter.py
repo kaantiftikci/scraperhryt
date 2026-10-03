@@ -21,6 +21,7 @@ from ..broker import Broker, Message, Queue, Reject, RoutingKey
 from ..config import Settings
 from ..models import NewsRecord, Stage
 from ..textutil import KeywordHit, KeywordMatcher, excerpt
+from .preclassifier import Embedder, Preclassifier
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class FilterStats:
     hits: int = 0
     misses: int = 0
     forwarded_unmatched: int = 0  # llm_score_all açıkken eşleşmeden LLM'e yönlendirilenler
+    prefiltered: int = 0  # ön sınıflandırıcının LLM'e göndermeden elediği eşleşmeler
     rejected: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -74,9 +76,10 @@ class FilterStats:
 class KeywordFilterService:
     """``Queue.ARTICLES_RAW`` tüketicisi; her haberi anahtar kelime listesine göre yönlendirir."""
 
-    def __init__(self, settings: Settings, broker: Broker) -> None:
+    def __init__(self, settings: Settings, broker: Broker, embedder: Embedder | None = None) -> None:
         self.settings = settings
         self.broker = broker
+        self.preclassifier = Preclassifier(settings, embedder) if settings.preclassifier_enabled else None
         self.aliases = load_keyword_aliases(settings.keyword_aliases_path, settings.keyword_list)
         self.matcher = KeywordMatcher(list(settings.keyword_list) + list(self.aliases))
         self.stats = FilterStats()
@@ -113,6 +116,24 @@ class KeywordFilterService:
 
         hits = self.classify(record)
         title = excerpt(record.title, 80)
+        if hits and self.preclassifier is not None:
+            decision = self.preclassifier.evaluate(record.text_for_matching(), hits)
+            record.relevance = decision.relevance
+            if decision.drop:
+                record.matched_keywords = [h.keyword for h in hits]
+                record.prefilter_reason = decision.reason
+                record.mark_not_scored()
+                self.broker.publish(RoutingKey.ARTICLE_SCORED, record.to_message())
+                self.stats.prefiltered += 1
+                log.info(
+                    "Ön sınıflandırıcı eledi [%s] %s → %s | %s | %s",
+                    record.source,
+                    title,
+                    Queue.ARTICLES_SCORED,
+                    ", ".join(f"{h.keyword}×{h.count}" for h in hits),
+                    decision.reason,
+                )
+                return
         if hits:
             record.matched_keywords = [h.keyword for h in hits]
             record.stage = Stage.KEYWORD
