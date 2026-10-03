@@ -351,6 +351,11 @@ class QAEngine:
         if not text:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return extractive_answer(ordered, citations), FALLBACK_MODEL
+        if _is_refusal(text) and citations:
+            # Belgeler ilgililik süzgecinden geçti (soru terimleri metinde var) ama küçük model sentezleyemedi:
+            # soruyu yanıtsız bırakmak yerine en yeni ilgili haberlerden çıkarımsal özet ver.
+            log.info("Model 'yeterli bilgi yok' dedi ama %d ilgili haber var; çıkarımsal özet verilecek", len(citations))
+            return extractive_answer(ordered, citations, reason="model ilgili haberleri sentezleyemedi"), FALLBACK_MODEL
         return text, self.llm.model_name
 
 
@@ -399,11 +404,20 @@ def filter_relevant(ranked: Sequence[RankedDoc], *, terms: Sequence[str], entiti
     Özel adlar (``entities``) varsa en az bir özel ad eşleşmesi aranır; yoksa herhangi bir anlamlı terim yeter.
     Terim çıkarılamazsa sıralama olduğu gibi döner.
     """
-    entity_terms = key_terms([], entities)
+    # Özel adlar bütün ifade olarak aranır ("Kemal Kılıçdaroğlu"); tek kelimeye bölmek "özel", "kemal" gibi
+    # yaygın sözcüklerle ilgisiz haberleri geçirir. Çok kelimeli adın tek başına soyadı da (≥6 harf) kabul edilir.
+    phrases: list[str] = []
+    for ent in entities:
+        words = [w for w in tr_lower(ent).replace("'", " ").split() if w not in _QUESTION_STOPWORDS]
+        if not words:
+            continue
+        phrases.append(" ".join(words))
+        if len(words) > 1 and len(words[-1]) >= 6:
+            phrases.append(words[-1])
     all_terms = key_terms(terms, entities)
-    if not all_terms:
+    if not (phrases or all_terms):
         return list(ranked)
-    matcher = KeywordMatcher(entity_terms or all_terms)
+    matcher = KeywordMatcher(phrases or all_terms)
     kept: list[RankedDoc] = []
     for item in ranked:
         doc = item.doc
@@ -413,10 +427,15 @@ def filter_relevant(ranked: Sequence[RankedDoc], *, terms: Sequence[str], entiti
     return kept
 
 
+def _is_refusal(text: str) -> bool:
+    low = tr_lower(text)
+    return len(low) < 220 and ("yeterli bilgi yok" in low or "bilgi bulunmuyor" in low or "bilgi bulunmamaktadır" in low)
+
+
 def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation], *, reason: str = "") -> str:
     """LLM'siz yedek yanıt: en yeni ``FALLBACK_HEADLINES`` başlık + tarih, ardından en yeni haberin özeti (atıflı)."""
     why = f" ({excerpt(reason, 120)})" if reason else ""
-    lines = [f"Dil modeline erişilemediği için{why} yanıt haberlerden doğrudan derlendi (en yeniden en eskiye):"]
+    lines = [f"Yanıt haberlerden doğrudan derlendi{why}; en yeniden en eskiye:"]
     for index, citation in enumerate(list(citations)[:FALLBACK_HEADLINES], 1):
         source = f" ({citation.source})" if citation.source else ""
         lines.append(f"- {format_tr(citation.published_at)} — {citation.title}{source} [{index}]")

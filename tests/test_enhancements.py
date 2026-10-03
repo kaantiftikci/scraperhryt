@@ -330,3 +330,29 @@ def test_search_page_renders_and_links() -> None:
     assert page.status_code == 200 and "Haber Radarı" in page.text and "/articles/search" in page.text
     assert 'href="/ara"' in client.get("/").text
     assert client.get("/articles/search", params={"q": "fon"}).json()["count"] >= 1  # UI "results" anahtarını okur
+
+
+def test_filter_relevant_requires_entity_phrase_not_common_words() -> None:
+    from scraperhryt.reporting.rag import RankedDoc, filter_relevant
+
+    def rd(title: str, content: str = "") -> RankedDoc:
+        return RankedDoc(doc={"title": title, "content": content, "id": title}, score=1.0)
+
+    ranked = [
+        rd("Beşiktaş'ta özel araç kazası", "özel hastaneye kaldırıldı"),
+        rd("Mustafa Kemal Atatürk anıldı"),
+        rd("Kılıçdaroğlu'ndan Özgür Özel'e yanıt", "CHP eski genel başkanı"),
+        rd("Özgür Özel'den açıklama"),
+    ]
+    kept = filter_relevant(ranked, terms=["son durum"], entities=["Özgür Özel", "Kemal Kılıçdaroğlu"])
+    assert [k.doc["title"] for k in kept] == ["Kılıçdaroğlu'ndan Özgür Özel'e yanıt", "Özgür Özel'den açıklama"]
+    assert filter_relevant(ranked, terms=["kaza"], entities=[])[0].doc["title"].startswith("Beşiktaş")
+
+
+def test_model_refusal_with_relevant_docs_falls_back_to_extractive() -> None:
+    s = settings(rag_recency_days=30)
+    store = InMemoryStore()
+    store.index_record(make_record("Fon soruşturmasında 20 şüpheli tutuklandı", "Savcılık 85 tutuklu olduğunu açıkladı", keywords=["fon"], days_ago=1))
+    engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
+    answer = engine.ask("Fon soruşturmasında son durum ne?")
+    assert answer.model == "fallback" and "Fon soruşturmasında 20 şüpheli" in answer.answer and answer.sources

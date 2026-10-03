@@ -270,6 +270,8 @@ RAG_SYSTEM_PROMPT = (
     "geriye doğru kronolojiyi kısaca özetle.\n"
     "- Soruyla ilgisiz haberleri yok say: 'en güncel gelişme' soruyla İLGİLİ haberler arasındaki en yeni "
     "olandır; listede [1] olmak zorunda değildir.\n"
+    "- Haber başlıkları sorudaki konuyu içeriyorsa 'yeterli bilgi yok' DEME; o haberlerdeki somut gelişmeleri "
+    "(kim, ne, ne zaman, sayılar) en yeniden başlayarak özetle.\n"
     "- Her iddianın sonuna dayandığı haberin numarasını köşeli parantezle ekle: [1], [2] gibi; birden fazla "
     "habere dayanıyorsa [1][3].\n"
     "- Haberlerde olmayan bilgi ekleme, tahmin yürütme, genel bilgine başvurma; haberler arasındaki "
