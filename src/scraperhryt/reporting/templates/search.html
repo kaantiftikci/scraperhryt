@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Haber Arama</title>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1f24; --muted:#6b7280; --line:#e5e7eb; --accent:#1d4ed8; --alarm:#b91c1c; --ok:#047857; --warn:#b45309; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --ink:#e7e9ee; --muted:#9aa3b2; --line:#2a2f3a; --accent:#7aa2ff; --alarm:#f87171; --ok:#34d399; --warn:#fbbf24; } }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding:16px; border-bottom:1px solid var(--line); background:var(--card); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+    header h1 { font-size:18px; margin:0; }
+    header nav a { color:var(--accent); text-decoration:none; margin-right:12px; }
+    main { max-width:1100px; margin:0 auto; padding:16px; }
+    .tabs { display:flex; gap:8px; margin-bottom:12px; }
+    .tabs button { padding:8px 14px; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:8px; cursor:pointer; }
+    .tabs button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+    .panel { display:none; } .panel.active { display:block; }
+    form.bar { display:grid; grid-template-columns: 1fr; gap:8px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; }
+    @media (min-width: 720px) { form.bar { grid-template-columns: 2fr repeat(5, minmax(90px, 1fr)) auto; align-items:end; } }
+    label { display:block; font-size:12px; color:var(--muted); }
+    input, select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+    button.primary { padding:9px 16px; background:var(--accent); color:#fff; border:0; border-radius:8px; cursor:pointer; font-weight:600; }
+    .status { color:var(--muted); margin:10px 0; min-height:1.4em; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:10px 0; }
+    .card h3 { margin:0 0 4px; font-size:16px; } .card h3 a { color:var(--ink); text-decoration:none; } .card h3 a:hover { text-decoration:underline; }
+    .meta { font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line); }
+    .badge.alarm { color:var(--alarm); border-color:var(--alarm); } .badge.ok { color:var(--ok); border-color:var(--ok); } .badge.kw { color:var(--accent); border-color:var(--accent); }
+    .badge.review { color:var(--warn); border-color:var(--warn); }
+    .snippet { margin:8px 0 0; color:var(--ink); } .snippet mark { background:#fde68a; color:#1c1f24; padding:0 2px; border-radius:3px; }
+    .reason { margin:8px 0 0; padding:8px 10px; border-left:3px solid var(--alarm); background:rgba(185,28,28,.06); border-radius:6px; font-size:14px; white-space:pre-wrap; }
+    .fb { margin-top:8px; display:flex; gap:6px; } .fb button { padding:4px 10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:6px; cursor:pointer; font-size:12px; }
+    .answer { white-space:pre-wrap; } ol.timeline { padding-left:18px; } ol.timeline li { margin:4px 0; } .tdate { color:var(--muted); font-size:12px; margin-right:6px; }
+    .sources li { margin:4px 0; } .sources a { color:var(--accent); }
+    .empty { text-align:center; color:var(--muted); padding:30px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Haber Arama</h1>
+  <nav><a href="/">Pano</a><a href="/docs">API</a></nav>
+</header>
+<main>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="search">Haber ara</button>
+    <button role="tab" aria-selected="false" data-tab="ask">Soru sor (RAG)</button>
+    <button role="tab" aria-selected="false" data-tab="alarms">Alarmlar</button>
+  </div>
+
+  <section class="panel active" id="panel-search">
+    <form class="bar" id="search-form">
+      <div><label for="q">Arama</label><input id="q" name="q" placeholder="ör. fon soruşturması, Özgür Özel, bakan açıklaması" autofocus></div>
+      <div><label for="source">Kaynak</label><select id="source"><option value="">Tümü</option><option value="hurriyet">Hürriyet</option><option value="12punto">12punto</option></select></div>
+      <div><label for="since">Son N gün</label><input id="since" type="number" min="1" max="3660" value="{{ since_days }}"></div>
+      <div><label for="minscore">Min. skor</label><input id="minscore" type="number" min="0" max="100" placeholder="-"></div>
+      <div><label for="only-alarms">Sadece alarm</label><select id="only-alarms"><option value="false">Hayır</option><option value="true">Evet</option></select></div>
+      <div><label for="size">Adet</label><select id="size"><option>20</option><option>50</option><option>100</option></select></div>
+      <div><button class="primary" type="submit">Ara</button></div>
+    </form>
+    <p class="status" id="search-status">Arama yapmak için bir terim girin; boş bırakırsanız en yeni haberler listelenir.</p>
+    <div id="results"></div>
+  </section>
+
+  <section class="panel" id="panel-ask">
+    <form class="bar" id="ask-form" style="grid-template-columns: 3fr 1fr auto;">
+      <div><label for="question">Soru</label><input id="question" placeholder="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" minlength="2" required></div>
+      <div><label for="ask-days">Son N gün</label><input id="ask-days" type="number" min="1" max="3660" value="{{ since_days }}"></div>
+      <div><button class="primary" type="submit" id="ask-btn">Sor</button></div>
+    </form>
+    <p class="status" id="ask-status"></p>
+    <div id="ask-result"></div>
+  </section>
+
+  <section class="panel" id="panel-alarms">
+    <form class="bar" id="alarm-form" style="grid-template-columns: 1fr 1fr 1fr auto;">
+      <div><label for="alarm-hours">Son N saat</label><input id="alarm-hours" type="number" min="1" max="8760" value="48"></div>
+      <div><label for="alarm-min">Min. skor</label><input id="alarm-min" type="number" min="0" max="100" placeholder="-"></div>
+      <div><label for="alarm-dups">Tekrarlar</label><select id="alarm-dups"><option value="false">Gizle</option><option value="true">Göster</option></select></div>
+      <div><button class="primary" type="submit">Listele</button></div>
+    </form>
+    <p class="status" id="alarm-status"></p>
+    <div id="alarms"></div>
+  </section>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const fmtDate = (iso) => { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? esc(iso) : d.toLocaleString("tr-TR", { dateStyle: "short", timeStyle: "short" }); };
+  const highlight = (text, q) => {
+    let out = esc(text || "");
+    (q || "").split(/\s+/).filter((w) => w.length > 2).forEach((w) => {
+      out = out.replace(new RegExp("(" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*)", "giu"), "<mark>$1</mark>");
+    });
+    return out;
+  };
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", x === b));
+    document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === "panel-" + b.dataset.tab));
+    if (b.dataset.tab === "alarms" && !$("alarms").dataset.loaded) loadAlarms();
+  }));
+
+  function scoreBadge(doc) {
+    const s = Number(doc.alarm_score || 0);
+    const cls = doc.is_alarm ? "alarm" : "ok";
+    return `<span class="badge ${cls}">skor ${s}${doc.is_alarm ? " · ALARM" : ""}</span>`;
+  }
+  function renderArticle(doc, q) {
+    const kws = (doc.matched_keywords || []).map((k) => `<span class="badge kw">${esc(k)}</span>`).join(" ");
+    const review = doc.needs_review ? `<span class="badge review">inceleme</span>` : "";
+    const body = doc.snippet || doc.llm_summary || doc.subtitle || "";
+    return `<article class="card">
+      <h3><a href="${esc(doc.content_url)}" target="_blank" rel="noopener">${esc(doc.title)}</a></h3>
+      <div class="meta"><span>${esc(doc.source)}</span><span>${fmtDate(doc.published_at)}</span>${doc.category ? `<span>${esc(doc.category)}</span>` : ""}${scoreBadge(doc)}${kws}${review}</div>
+      ${doc.subtitle && body !== doc.subtitle ? `<p class="snippet"><em>${highlight(doc.subtitle, q)}</em></p>` : ""}
+      ${body ? `<p class="snippet">${highlight(body, q)}</p>` : ""}
+      ${doc.is_alarm && doc.alarm_reason ? `<div class="reason">${esc(doc.alarm_reason)}</div>` : ""}
+    </article>`;
+  }
+
+  async function search(ev) {
+    if (ev) ev.preventDefault();
+    const q = $("q").value.trim();
+    const p = new URLSearchParams({ q, size: $("size").value, only_alarms: $("only-alarms").value });
+    if ($("source").value) p.set("sources", $("source").value);
+    if ($("since").value) p.set("since_days", $("since").value);
+    if ($("minscore").value) p.set("min_score", $("minscore").value);
+    $("search-status").textContent = "Aranıyor…";
+    try {
+      const r = await fetch("/articles/search?" + p.toString());
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      const data = await r.json();
+      const items = data.results || [];
+      $("search-status").textContent = `${items.length} sonuç` + (q ? ` — "${q}"` : "");
+      $("results").innerHTML = items.length ? items.map((d) => renderArticle(d, q)).join("") : `<p class="empty">Sonuç bulunamadı.</p>`;
+    } catch (e) { $("search-status").textContent = "Hata: " + e.message; }
+  }
+  $("search-form").addEventListener("submit", search);
+
+  async function ask(ev) {
+    ev.preventDefault();
+    const question = $("question").value.trim();
+    if (!question) return;
+    $("ask-btn").disabled = true; $("ask-status").textContent = "Yanıt üretiliyor (LLM)… bu birkaç saniye sürebilir."; $("ask-result").innerHTML = "";
+    try {
+      const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("ask-days").value) || undefined }) });
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      const a = await r.json();
+      $("ask-status").textContent = `Model: ${a.model} · ${a.retrieved_count} haber · terimler: ${(a.search_terms || []).join(", ") || "-"}`;
+      const timeline = (a.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${t.citation}] ` : ""}${esc(t.event)}</li>`).join("");
+      const sources = (a.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${esc(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
+      $("ask-result").innerHTML = `<div class="card"><p class="answer">${esc(a.answer)}</p></div>` +
+        (timeline ? `<div class="card"><h3>Zaman çizelgesi (eski → yeni)</h3><ol class="timeline">${timeline}</ol></div>` : "") +
+        (sources ? `<div class="card"><h3>Kaynaklar</h3><ol class="sources">${sources}</ol></div>` : "");
+    } catch (e) { $("ask-status").textContent = "Hata: " + e.message; }
+    finally { $("ask-btn").disabled = false; }
+  }
+  $("ask-form").addEventListener("submit", ask);
+
+  async function feedback(alarmId, label, btn) {
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/alarms/${encodeURIComponent(alarmId)}/feedback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, user: "dashboard" }) });
+      btn.textContent = r.ok ? "kaydedildi ✓" : "hata";
+    } catch (e) { btn.textContent = "hata"; }
+  }
+  function renderAlarm(a) {
+    const dup = a.duplicate_of ? `<span class="badge">tekrar → ${esc(a.duplicate_of)}</span>` : "";
+    const review = a.needs_review ? `<span class="badge review">inceleme</span>` : "";
+    const kws = (a.matched_keywords || []).map((k) => `<span class="badge kw">${esc(k)}</span>`).join(" ");
+    return `<article class="card">
+      <h3><a href="${esc(a.content_url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
+      <div class="meta"><span>${esc(a.source)}</span><span>${fmtDate(a.published_at)}</span><span class="badge alarm">skor ${esc(a.alarm_score)}</span>${kws}${review}${dup}<span>olay: ${esc(a.event_id || "-")}</span></div>
+      ${a.alarm_reason ? `<div class="reason">${esc(a.alarm_reason)}</div>` : ""}
+      <div class="fb"><span class="tdate">Doğru mu?</span>
+        <button data-id="${esc(a.alarm_id)}" data-label="true_positive">✓ doğru</button>
+        <button data-id="${esc(a.alarm_id)}" data-label="false_positive">✗ yanlış</button>
+        <button data-id="${esc(a.alarm_id)}" data-label="needs_context">? belirsiz</button></div>
+    </article>`;
+  }
+  async function loadAlarms(ev) {
+    if (ev) ev.preventDefault();
+    const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 100, include_duplicates: $("alarm-dups").value });
+    if ($("alarm-min").value) p.set("min_score", $("alarm-min").value);
+    $("alarm-status").textContent = "Yükleniyor…";
+    try {
+      const r = await fetch("/alarms?" + p.toString());
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      const data = await r.json();
+      $("alarm-status").textContent = `${data.count} alarm`;
+      $("alarms").innerHTML = data.items.length ? data.items.map(renderAlarm).join("") : `<p class="empty">Alarm yok.</p>`;
+      $("alarms").dataset.loaded = "1";
+      $("alarms").querySelectorAll(".fb button").forEach((b) => b.addEventListener("click", () => feedback(b.dataset.id, b.dataset.label, b)));
+    } catch (e) { $("alarm-status").textContent = "Hata: " + e.message; }
+  }
+  $("alarm-form").addEventListener("submit", loadAlarms);
+  search();
+})();
+</script>
+</body>
+</html>

@@ -319,3 +319,14 @@ def test_preclassifier_disabled_or_no_embedder_passes_through() -> None:
     broker2 = InMemoryBroker(s2)
     KeywordFilterService(s2, broker2, embedder=None).handle(_msg(NewsRecord.new(source="hurriyet", content_url="https://www.hurriyet.com.tr/gundem/y-1", title="Fon soruşturması", content="")))
     assert broker2.size(Queue.ARTICLES_KEYWORD) == 1
+
+
+def test_search_page_renders_and_links() -> None:
+    s = settings()
+    store = InMemoryStore()
+    store.index_record(make_record("Fon soruşturması haberi", "içerik", keywords=["fon"]))
+    client = TestClient(create_app(s, store, FakeOllama()))
+    page = client.get("/ara")
+    assert page.status_code == 200 and "Haber Arama" in page.text and "/articles/search" in page.text
+    assert 'href="/ara"' in client.get("/").text
+    assert client.get("/articles/search", params={"q": "fon"}).json()["count"] >= 1  # UI "results" anahtarını okur

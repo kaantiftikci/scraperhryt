@@ -539,6 +539,11 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         )
 
     # --- pano ---
+    @app.get("/ara", response_class=HTMLResponse, include_in_schema=False)
+    def search_page(request: Request) -> HTMLResponse:
+        """Arama / soru-cevap / alarm arayüzü (tek sayfa, mevcut JSON uçlarını kullanır)."""
+        return templates.TemplateResponse(request, "search.html", {"since_days": settings.rag_recency_days})
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard(request: Request) -> HTMLResponse:
         now = utcnow()
