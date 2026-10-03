@@ -367,7 +367,7 @@ def test_extractive_answer_is_short_prose_not_headline_list() -> None:
     store.index_record(b)
     engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
     answer = engine.ask("Fon soruşturmasında son durum ne?")
-    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer and "Daha önce" in answer.answer
+    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer and "Daha önce:" in answer.answer
     assert "\n- " not in answer.answer and answer.answer.count(".") <= 5 and "2,5 milyar" in answer.answer
 
 

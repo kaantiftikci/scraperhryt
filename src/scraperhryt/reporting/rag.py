@@ -181,7 +181,8 @@ class QAEngine:
         source_filter = [s.strip() for s in (sources or []) if s and s.strip()] or None
 
         terms, entities = self.rewrite_query(question)
-        search_terms = _dedupe(terms + entities)[:MAX_SEARCH_TERMS]
+        # Görüntülenen arama terimleri: soruda karşılığı olmayan (uydurma olabilecek) varlıklar gösterilmez.
+        search_terms = _dedupe(terms + ground_entities(question, entities))[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
         # Süzgeç sonrası top_k dolu kalsın diye iki katı aday getirilir (yeniden yazma terimleri gürültü ekleyebilir).
         ranked = self.retrieve(question, queries, since=since, size=size * 2, sources=source_filter)
@@ -582,9 +583,9 @@ def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation
         if not sentences:
             sentences.append(f"Son gelişme ({stamp}): {detail} [{index}].")
         elif len(sentences) == 1:
-            sentences.append(f"Daha önce {detail[0].lower() + detail[1:]} [{index}].")
+            sentences.append(f"Daha önce: {detail} [{index}].")
         else:
-            sentences.append(f"Ayrıca {detail[0].lower() + detail[1:]} [{index}].")
+            sentences.append(f"Ayrıca: {detail} [{index}].")
         if len(sentences) >= 3:
             break
     text = " ".join(sentences)
