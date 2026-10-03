@@ -314,8 +314,9 @@ def test_qa_engine_fallback_when_llm_unavailable(settings: Settings, seeded) -> 
     answer = QAEngine(settings, store, llm).ask(QUESTION)
 
     assert answer.model == FALLBACK_MODEL
-    assert records["newest"].title in answer.answer
-    assert answer.answer.index(records["newest"].title) < answer.answer.index(records["middle"].title)
+    # Yedek yanıt 2-3 cümlelik özettir: en yeni haber [1] olarak önce gelir, başlık listesi yoktur.
+    assert answer.sources[0].id == records["newest"].id and answer.answer.startswith("Son gelişme (")
+    assert "[1]" in answer.answer and answer.answer.index("[1]") < answer.answer.index("[2]")
     assert "[1]" in answer.answer
     assert answer.sources[0].id == records["newest"].id
     assert answer.search_terms == ["özgür", "özel", "kemal", "kılıçdaroğlu"]
@@ -431,7 +432,7 @@ def test_qa_engine_with_heuristic_llm_is_deterministic(settings: Settings, seede
     store, records, _ = seeded
     answer = QAEngine(settings, store, HeuristicLLM(settings)).ask(QUESTION)
     assert answer.model == FALLBACK_MODEL
-    assert answer.sources[0].id == records["newest"].id and records["newest"].title in answer.answer
+    assert answer.sources[0].id == records["newest"].id and answer.answer.startswith("Son gelişme (")
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -876,7 +877,8 @@ def test_api_ask_falls_back_without_llm(settings: Settings, seeded) -> None:
     store, records, _ = seeded
     http = TestClient(create_app(settings, store, FakeOllama(available=False)))
     body = http.post("/ask", json={"question": QUESTION}).json()
-    assert body["model"] == FALLBACK_MODEL and records["newest"].title in body["answer"]
+    assert body["model"] == FALLBACK_MODEL and body["sources"][0]["id"] == records["newest"].id
+    assert body["answer"].startswith("Son gelişme (")
 
 
 def test_api_ask_marks_no_evidence_distinct_from_llm_outage(settings: Settings, seeded) -> None:

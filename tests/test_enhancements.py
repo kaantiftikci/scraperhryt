@@ -355,7 +355,7 @@ def test_model_refusal_with_relevant_docs_falls_back_to_extractive() -> None:
     store.index_record(make_record("Fon soruşturmasında 20 şüpheli tutuklandı", "Savcılık 85 tutuklu olduğunu açıkladı", keywords=["fon"], days_ago=1))
     engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
     answer = engine.ask("Fon soruşturmasında son durum ne?")
-    assert answer.model == "fallback" and "Fon soruşturmasında 20 şüpheli" in answer.answer and answer.sources
+    assert answer.model == "fallback" and "85 tutuklu" in answer.answer and answer.sources  # özet, başlık listesi değil
 
 
 def test_extractive_answer_is_short_prose_not_headline_list() -> None:

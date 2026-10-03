@@ -409,7 +409,7 @@ def _install_fake_qa(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def test_ask_prints_answer_with_sources(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     captured = _install_fake_qa(monkeypatch)
     question = "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?"
-    assert cli.main(["ask", question, "--since-days", "7", "--top-k", "5", "--fake-llm"]) == 0
+    assert cli.main(["ask", question, "--since-days", "7", "--top-k", "5", "--fake-llm", "--sources"]) == 0
     out = capsys.readouterr().out
     assert f"Soru: {question}" in out
     assert "gerilim sürüyor [1]" in out

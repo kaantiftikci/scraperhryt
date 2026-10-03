@@ -351,6 +351,7 @@ class QAEngine:
         if not text:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return extractive_answer(ordered, citations), FALLBACK_MODEL
+        text = _strip_leading_refusal(text)
         if _is_refusal(text) and citations:
             # Belgeler ilgililik süzgecinden geçti (soru terimleri metinde var) ama küçük model sentezleyemedi:
             # soruyu yanıtsız bırakmak yerine en yeni ilgili haberlerden çıkarımsal özet ver.
@@ -425,6 +426,15 @@ def filter_relevant(ranked: Sequence[RankedDoc], *, terms: Sequence[str], entiti
         if matcher.matches(text):
             kept.append(item)
     return kept
+
+
+_REFUSAL_PREFIX_RE = re.compile(r"^\s*elimdeki haberlerde bu konuda yeterli bilgi yok\.?\s*", re.IGNORECASE)
+
+
+def _strip_leading_refusal(text: str) -> str:
+    """Küçük modeller bazen önce 'yeterli bilgi yok' deyip ardından özet yazar; başa eklenen ret cümlesi atılır."""
+    stripped = _REFUSAL_PREFIX_RE.sub("", text, count=1).strip()
+    return stripped if stripped and stripped != text and len(stripped) > 40 else text
 
 
 def _is_refusal(text: str) -> bool:
