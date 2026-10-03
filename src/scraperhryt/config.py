@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     rabbitmq_dlx: str = "news.dlx"
     rabbitmq_prefetch: int = 8
     rabbitmq_max_attempts: int = 5
-    rabbitmq_retry_delay_ms: int = 15_000
+    rabbitmq_retry_delay_ms: int = 15_000  # kuyruk argümanıdır: değiştirince q.*.retry kuyruklarını silip yeniden oluşturun
     rabbitmq_heartbeat: int = 60
 
     # ---- Elasticsearch ----
@@ -74,9 +74,12 @@ class Settings(BaseSettings):
     hurriyet_gundem_rss: str = "https://www.hurriyet.com.tr/rss/gundem"
     hurriyet_gundem_listing: str = "https://www.hurriyet.com.tr/gundem/"
     punto_base_url: str = "https://12punto.com.tr"
+    # 12punto'nun /rss/<kategori> beslemesi ve /<kategori> listesi olan tüm bölümler. Karışık /rss yalnızca son
+    # 20 haberi verdiğinden listede olmayan bir bölüm, tarama aralığı uzadığında sessizce kaçar.
     punto_categories: str = (
         "gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,"
-        "yerel-haberler,kultur-sanat,saglik,egitim,cevre"
+        "yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,"
+        "otomotiv,seyahat,gurme,trend-bilgi-kapsulu"
     )
 
     # ---- Alarm katmanı ----

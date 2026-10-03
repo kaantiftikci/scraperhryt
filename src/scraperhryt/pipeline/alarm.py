@@ -12,7 +12,14 @@ Yeniden teslimde (ack kaybı, retry) aynı ``alarm_id`` depoda zaten varsa ve ka
 değişmemişse kanal bildirimi ve yayın tekrarlanmaz. Alarm belgesi en SON yazılır; böylece yayın başarısız
 olursa yeniden denemede olay yeniden yayınlanır (kaybolmaz), bunun bedeli nadiren çift bildirimdir.
 
-Elasticsearch'e ulaşılamadığında depo ``Retry`` fırlatır; broker mesajı gecikmeli yeniden dener.
+Elasticsearch'e ulaşılamadığında depo ``Unavailable`` (``Retry`` alt tipi) fırlatır. Servis bu durumda mesajı
+hemen geri vermez: önce ``_prepare_indices`` ile ES yeniden erişilebilir olana dek bekler (geri basınç; prefetch
+kadar mesaj askıda kalır), sonra istisnayı broker'a iletir. Böylece dakikalar süren bir ES kesintisi
+``rabbitmq_max_attempts`` bütçesini tüketmez ve hiçbir kayıt ölü mektuba düşmez.
+
+Embedding modeli ``EMBEDDING_DIMS``'ten farklı boyutta vektör üretiyorsa (ör. mxbai-embed-large=1024, nomic=768)
+``dense_vector`` eşlemesi belgeyi reddederdi; bu yüzden boyut başlangıçta (``run``) ve kayıt başına denetlenir,
+uyuşmayan vektör atılır ve kayıt vektörsüz yazılır.
 """
 
 from __future__ import annotations
@@ -34,7 +41,9 @@ from ..textutil import excerpt
 
 log = logging.getLogger(__name__)
 
+_INDEX_RETRY_INITIAL_DELAY = 1.0
 _INDEX_RETRY_MAX_DELAY = 30.0
+_EMBED_PROBE_TEXT = "Bağlantı denemesi"  # başlangıçta embedding boyutunu doğrulamak için gönderilen metin
 
 
 class Embedder(Protocol):
@@ -80,12 +89,25 @@ class AlarmService:
         self.sinks: list[AlarmSink] = list(sinks) if sinks is not None else build_sinks(settings)
         self.embedder = embedder if settings.ollama_embedding_model else None
         self.stats = AlarmStats()
+        self._stop_event = threading.Event()
         if embedder is not None and self.embedder is None:
             log.info("embedder verildi ama OLLAMA_EMBEDDING_MODEL boş; vektör üretimi kapalı")
 
     # --- yardımcılar ---
+    def _store_rejects_embeddings(self) -> bool:
+        """Depo (``ElasticsearchStore.ensure_indices``/``index_record``) eşleme uyuşmazlığında vektör indekslemeyi
+        kapatır; o durumda her kayıt için boşa embedding üretmek yerine üretim burada da kapatılır."""
+        if self.embedder is None or getattr(self.store, "embeddings_enabled", True):
+            return False
+        log.warning(
+            "Depo vektör indekslemeyi kapattı (embedding eşlemesi ayarlarla uyuşmuyor); vektör üretimi KAPATILDI, "
+            "kayıtlar vektörsüz yazılacak"
+        )
+        self.embedder = None
+        return True
+
     def _embedding_for(self, record: NewsRecord) -> list[float] | None:
-        if self.embedder is None:
+        if self.embedder is None or self._store_rejects_embeddings():
             return None
         body = (record.content or "")[: self.settings.ollama_max_content_chars]
         text = "\n".join(part for part in (record.title, record.subtitle, body) if part)
@@ -99,7 +121,49 @@ class AlarmService:
             self.stats.embed_failures += 1
             log.warning("Embedding boş döndü (kayıt %s), vektörsüz yazılacak", record.id)
             return None
-        return [float(x) for x in vectors[0]]
+        vector = [float(x) for x in vectors[0]]
+        expected = int(self.settings.embedding_dims)
+        if len(vector) != expected:
+            self.stats.embed_failures += 1
+            log.error(
+                "Embedding boyutu %d, EMBEDDING_DIMS=%d (kayıt %s); vektörsüz yazılacak. EMBEDDING_DIMS'i modele "
+                "(%s) göre düzeltin",
+                len(vector),
+                expected,
+                record.id,
+                self.settings.ollama_embedding_model,
+            )
+            return None
+        return vector
+
+    def _check_embedder(self) -> None:
+        """Başlangıçta embedding modelinin ``EMBEDDING_DIMS`` boyutunda vektör ürettiğini doğrular.
+
+        Uyuşmazlıkta vektör üretimi kapatılır (kayıtlar vektörsüz yazılmaya devam eder; her kayıt ES'e
+        ulaşmalıdır). Model o an erişilemiyorsa denetim kayıt başına ``_embedding_for``'a bırakılır.
+        """
+        if self.embedder is None or self._store_rejects_embeddings():
+            return
+        expected = int(self.settings.embedding_dims)
+        model = self.settings.ollama_embedding_model
+        try:
+            vectors = self.embedder.embed([_EMBED_PROBE_TEXT])
+        except Exception as exc:
+            log.warning("Embedding modeli (%s) başlangıçta doğrulanamadı: %s; boyut kayıt başına denetlenecek", model, exc)
+            return
+        got = len(vectors[0]) if vectors and vectors[0] else 0
+        if got == expected:
+            log.info("Embedding modeli doğrulandı: %s → %d boyut", model, got)
+            return
+        log.error(
+            "Embedding modeli %s %d boyutlu vektör üretiyor, EMBEDDING_DIMS=%d; vektör üretimi KAPATILDI, kayıtlar "
+            "vektörsüz yazılacak. EMBEDDING_DIMS=%d yapıp news-articles indeksini yeniden oluşturun",
+            model,
+            got,
+            expected,
+            got,
+        )
+        self.embedder = None
 
     def _already_raised(self, record: NewsRecord, alarm_id: str) -> bool:
         existing = self.store.get_alarm(alarm_id)
@@ -131,6 +195,17 @@ class AlarmService:
         record.stage = Stage.ALARM
         if record.processed_at is None:
             record.processed_at = utcnow()
+        try:
+            self._process(record)
+        except Retry as exc:
+            # ES kesintisi: mesajı hemen geri verip deneme bütçesini tüketmek yerine depo gelene dek bekle (geri basınç),
+            # sonra broker gecikmeli yeniden teslim etsin (Unavailable → TRANSIENT_MAX_ATTEMPTS tavanı).
+            log.warning("Depo erişilemiyor (kayıt %s): %s; Elasticsearch hazır olana dek bekleniyor", record.id, exc)
+            if self._prepare_indices(self._stop_event):
+                log.info("Elasticsearch yeniden erişilebilir; kayıt %s broker tarafından yeniden teslim edilecek", record.id)
+            raise
+
+    def _process(self, record: NewsRecord) -> None:
         title = excerpt(record.title, 80)
 
         if not record.is_alarm:
@@ -167,7 +242,8 @@ class AlarmService:
 
     # --- servis döngüsü ---
     def _prepare_indices(self, stop_event: threading.Event) -> bool:
-        delay = 1.0
+        """``ensure_indices`` başarana (True) ya da ``stop_event`` set edilene (False) dek üstel geri çekilmeyle bekler."""
+        delay = _INDEX_RETRY_INITIAL_DELAY
         while not stop_event.is_set():
             try:
                 self.store.ensure_indices()
@@ -182,10 +258,12 @@ class AlarmService:
     def run(self, stop_event: threading.Event | None = None, max_messages: int | None = None) -> int:
         """``q.articles.scored`` kuyruğunu tüketir; işlenen mesaj sayısını döndürür."""
         stop_event = stop_event or threading.Event()
+        self._stop_event = stop_event
         self.broker.declare_topology()
         if not self._prepare_indices(stop_event):
             log.info("Alarm katmanı indeksler hazırlanamadan durduruldu")
             return 0
+        self._check_embedder()
         log.info(
             "Alarm katmanı başlıyor: kuyruk=%s, eşik=%d, kanallar=%s, embedding=%s",
             Queue.ARTICLES_SCORED,

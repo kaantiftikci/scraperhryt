@@ -6,6 +6,7 @@ Tümü çevrimdışıdır: ``InMemoryBroker`` + ``FakeOllama`` (ve ``OllamaClien
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -13,7 +14,15 @@ from typing import Any
 import httpx
 import pytest
 
-from scraperhryt.broker import InMemoryBroker, Message, Queue, RoutingKey
+from scraperhryt.broker import (
+    InMemoryBroker,
+    Message,
+    Queue,
+    Retry,
+    RoutingKey,
+    Unavailable,
+    attempt_limit_for,
+)
 from scraperhryt.config import Settings
 from scraperhryt.models import NewsRecord, Stage
 from scraperhryt.pipeline.keyword_filter import KeywordFilterService
@@ -27,6 +36,7 @@ from scraperhryt.pipeline.llm import (
     extract_json_object,
     hashed_vector,
     normalize_model_name,
+    redact_url,
 )
 from scraperhryt.pipeline.prompts import (
     STRICT_JSON_REMINDER,
@@ -39,7 +49,9 @@ from scraperhryt.pipeline.prompts import (
     truncate_content,
 )
 from scraperhryt.pipeline.scorer import (
+    FALLBACK_MODEL,
     MAX_LLM_ATTEMPTS,
+    MAX_UNAVAILABLE_ROUNDS,
     RAW_LIMIT,
     ScoringService,
     build_verdict,
@@ -365,6 +377,26 @@ class TestOllamaClient:
             assert client.health() is False
             assert client.model_available() is False
 
+    def test_credentials_in_base_url_are_redacted(self) -> None:
+        settings = make_settings(ollama_base_url="http://svc:S3cretT0ken@ollama.internal:11434")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError(f"bağlantı reddedildi: {request.url}", request=request)
+
+        with _client(settings, handler) as client:
+            assert client.display_url == "http://svc:***@ollama.internal:11434"
+            with pytest.raises(LLMUnavailable) as info:
+                client.chat_json("s", "u")
+        message = str(info.value)
+        assert "S3cretT0ken" not in message
+        assert "ollama.internal:11434/api/chat" in message and "svc:***@" in message
+
+    def test_redact_url_helper(self) -> None:
+        assert redact_url("http://localhost:11434") == "http://localhost:11434"
+        assert redact_url("http://u:p@h:1/x?q=1") == "http://u:***@h:1/x?q=1"
+        assert redact_url("http://u@[::1]:1") == "http://u:***@[::1]:1"
+        assert redact_url("") == ""
+
     def test_timeout_is_unavailable(self, settings: Settings) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ReadTimeout("zaman aşımı", request=request)
@@ -417,6 +449,34 @@ class TestOllamaClient:
             vectors = client.embed(["a", "", "abc"])
         assert vectors == [[1.0, 1.0], [0.0, 0.0], [3.0, 1.0]]  # boş metin → sıfır vektör, sıra korunur
         assert [c[0] for c in calls] == ["/api/embed", "/api/embeddings", "/api/embeddings"]
+
+    def test_embed_legacy_mode_is_remembered(self, settings: Settings) -> None:
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path == "/api/embed":
+                return httpx.Response(404, text="404 page not found")
+            return httpx.Response(200, json={"embedding": [1.0, 2.0]})
+
+        with _client(settings, handler) as client:
+            assert client.embed(["a"]) == [[1.0, 2.0]]
+            assert client.embed(["b"]) == [[1.0, 2.0]]
+        assert paths == ["/api/embed", "/api/embeddings", "/api/embeddings"]  # ikinci çağrı /api/embed'i denemez
+
+    def test_embed_model_not_found_is_not_legacy_fallback(self) -> None:
+        settings = make_settings(ollama_embedding_model="nomic-embed-text")
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return httpx.Response(404, json={"error": "model 'nomic-embed-text' not found, try pulling it first"})
+
+        with _client(settings, handler) as client, pytest.raises(LLMUnavailable) as info:
+            client.embed(["a", "b", "c"])
+        assert paths == ["/api/embed"]  # eski uç noktaya düşülmez, her metin için ek istek atılmaz
+        assert "/api/embed)" in str(info.value) and "not found" in str(info.value)
+        assert "/api/embeddings" not in str(info.value)
 
     def test_embed_empty_input(self, settings: Settings) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -547,6 +607,16 @@ class TestBuildVerdict:
         assert normalize_topic("  Politika ") == "siyaset"
         assert normalize_topic("Hukuk/Adalet") == "hukuk"
         assert normalize_topic("tamamen alakasız") == "diğer"
+        # kanonik ad içerme, "politika" takma adından önce gelir
+        assert normalize_topic("ekonomi politikası") == "ekonomi"
+        assert normalize_topic("para politikası") == "ekonomi"
+        assert normalize_topic("finans politikası") == "finans/fon"
+        assert normalize_topic("genel politikası") == "siyaset"  # tamlayanın konusu yoksa "politika" takma adı
+        assert normalize_topic("maliye politikası") == "ekonomi"
+        assert normalize_topic("güvenlik politikası") == "güvenlik"
+        assert normalize_topic("dış politika") == "dış politika"
+        assert normalize_topic("sosyal politika") == "sosyal"
+        assert normalize_topic("iç politika") == "siyaset"
         assert coerce_str_list("a, b; c\nd") == ["a", "b", "c", "d"]
 
 
@@ -624,29 +694,46 @@ class TestScoringService:
         assert fake.chat_calls[1][2].endswith(STRICT_JSON_REMINDER)
         assert svc.stats.bad_output == 1
 
-    def test_always_bad_output_ends_in_dead_letters(self, settings: Settings, broker: InMemoryBroker) -> None:
+    def test_always_bad_output_is_retried_then_published_with_fallback_verdict(
+        self, settings: Settings, broker: InMemoryBroker
+    ) -> None:
         fake = FakeOllama(responder=lambda system, user: "asla json üretmiyorum")
         svc = ScoringService(settings, broker, fake)
-        record = make_record("Bakan", BAKAN_TEXT)
+        record = make_record("Bakan Yerlikaya açıklama yaptı", BAKAN_TEXT)
         broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body)
 
+        # ilk denemeler: bozuk çıktı → Retry (gecikmeli yeniden deneme, x-attempts artar)
+        assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle, max_messages=1) == 1
+        retried = broker.queues[Queue.ARTICLES_KEYWORD][0]
+        assert retried.attempts == 1 and "geçerli karar üretemedi" in retried.headers["x-error"]
+        assert broker.size(Queue.ARTICLES_SCORED) == 0 and len(broker.dead_letters) == 0
+
+        # son deneme: ölü mektup yerine sezgisel yedek kararla article.scored'a yayınlanır (ES'e ulaşır)
         processed = broker.consume(Queue.ARTICLES_KEYWORD, svc.handle)
-        assert processed == settings.rabbitmq_max_attempts
+        assert processed == settings.rabbitmq_max_attempts - 1
         assert broker.size(Queue.ARTICLES_KEYWORD) == 0
-        assert broker.size(Queue.ARTICLES_SCORED) == 0
-        assert len(broker.dead_letters) == 1
-        dead = broker.dead_letters[0]
-        assert dead.attempts == settings.rabbitmq_max_attempts
-        assert dead.body["id"] == record.id
-        assert "geçerli karar üretemedi" in dead.headers["x-error"]
+        assert len(broker.dead_letters) == 0
+        assert broker.size(Queue.ARTICLES_SCORED) == 1
+        out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
+        assert out.id == record.id and out.stage == Stage.SCORED and out.matched_keywords == ["bakan"]
+        assert out.llm is not None and out.llm.model == FALLBACK_MODEL
+        assert out.llm.attempts == settings.rabbitmq_max_attempts
+        assert out.llm.reason.startswith(f"LLM skorlaması {settings.rabbitmq_max_attempts} denemede tamamlanamadı")
+        assert "geçerli karar üretemedi" in out.llm.reason and "sezgisel yedek" in out.llm.reason
+        assert out.llm.summary and out.llm.topics
+        assert out.alarm_score == HeuristicLLM(settings).evaluate(title=record.title, content=record.content)[
+            "alarm_score"
+        ]
+        assert out.is_alarm == (out.alarm_score >= settings.alarm_threshold)
         assert len(fake.chat_calls) == settings.rabbitmq_max_attempts * MAX_LLM_ATTEMPTS
         assert svc.stats.exhausted == settings.rabbitmq_max_attempts
+        assert svc.stats.fallback == 1 and svc.stats.scored == 1
 
     def test_unavailable_llm_is_retried_with_attempt_header(
         self, settings: Settings, broker: InMemoryBroker
     ) -> None:
         fake = FakeOllama(available=False)
-        svc = ScoringService(settings, broker, fake)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=0)  # süreç içi bekleme kapalı
         record = make_record("Bakan", BAKAN_TEXT)
         broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body)
 
@@ -656,7 +743,7 @@ class TestScoringService:
         assert retried.attempts == 1 and retried.headers["x-attempts"] == 1
         assert "LLM erişilemiyor" in retried.headers["x-error"]
         assert len(broker.dead_letters) == 0
-        assert svc.stats.unavailable == 1
+        assert svc.stats.unavailable == 1 and svc.stats.waits == 0
 
         assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle, max_messages=1) == 1
         assert broker.queues[Queue.ARTICLES_KEYWORD][0].attempts == 2
@@ -665,17 +752,162 @@ class TestScoringService:
         fake.responder = lambda system, user: verdict_dict(90)
         assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle) == 1
         out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
-        assert out.id == record.id and out.is_alarm is True
+        assert out.id == record.id and out.is_alarm is True and out.llm is not None and out.llm.model == "fake"
 
-    def test_unavailable_raised_by_responder(self, settings: Settings, broker: InMemoryBroker) -> None:
-        def responder(system: str, user: str) -> dict[str, Any]:
-            raise LLMUnavailable("bağlantı yok")
-
-        svc = ScoringService(settings, broker, FakeOllama(responder=responder))
-        from scraperhryt.broker import Retry
-
-        with pytest.raises(Retry):
+    def test_ollama_outage_is_unavailable_not_counted_against_max_attempts(
+        self, settings: Settings, broker: InMemoryBroker
+    ) -> None:
+        """Ollama kapalı / model yok → Unavailable: rabbitmq_max_attempts (3) aşılsa da ölü mektup yok."""
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=0)
+        with pytest.raises(Unavailable, match="LLM erişilemiyor"):
             svc.score_record(make_record("Bakan", BAKAN_TEXT))
+
+        record = make_record("Bakan", BAKAN_TEXT)
+        broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body)
+        rounds = settings.rabbitmq_max_attempts * 4
+        assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle, max_messages=rounds) == rounds
+        assert len(broker.dead_letters) == 0
+        assert broker.size(Queue.ARTICLES_KEYWORD) == 1
+        assert broker.queues[Queue.ARTICLES_KEYWORD][0].attempts == rounds
+
+    def test_unavailable_raised_by_responder_while_ollama_healthy_is_plain_retry(
+        self, settings: Settings, broker: InMemoryBroker
+    ) -> None:
+        """Sunucu ayakta ama çağrı başarısız (zaman aşımı vb.) → sayılan Retry; son denemede yedek karar."""
+
+        def responder(system: str, user: str) -> dict[str, Any]:
+            raise LLMUnavailable("okuma zaman aşımı")
+
+        fake = FakeOllama(responder=responder)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=0)
+        with pytest.raises(Retry, match="LLM çağrısı başarısız") as info:
+            svc.score_record(make_record("Bakan", BAKAN_TEXT))
+        assert not isinstance(info.value, Unavailable)
+        assert svc.stats.unavailable == 1
+
+        record = make_record("Bakan", BAKAN_TEXT)
+        broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body)
+        assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle) == settings.rabbitmq_max_attempts
+        assert len(broker.dead_letters) == 0 and broker.size(Queue.ARTICLES_SCORED) == 1
+        out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
+        assert out.id == record.id and out.llm is not None and out.llm.model == FALLBACK_MODEL
+        assert "okuma zaman aşımı" in out.llm.reason
+        assert svc.stats.fallback == 1
+
+    def test_unavailable_last_attempt_publishes_fallback_verdict(
+        self, settings: Settings, broker: InMemoryBroker
+    ) -> None:
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=0)
+        limit = attempt_limit_for(settings, Unavailable("x"))
+        assert limit > settings.rabbitmq_max_attempts
+        record = make_record("Bakan", BAKAN_TEXT)
+        broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body, headers={"x-attempts": limit - 2})
+
+        assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle, max_messages=1) == 1
+        assert broker.size(Queue.ARTICLES_SCORED) == 0  # henüz son deneme değil
+        assert broker.queues[Queue.ARTICLES_KEYWORD][0].attempts == limit - 1
+
+        assert broker.consume(Queue.ARTICLES_KEYWORD, svc.handle) == 1
+        assert len(broker.dead_letters) == 0 and broker.size(Queue.ARTICLES_SCORED) == 1
+        out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
+        assert out.id == record.id and out.llm is not None
+        assert out.llm.model == FALLBACK_MODEL and out.llm.attempts == limit
+        assert svc.stats.fallback == 1
+
+    def test_waits_for_ollama_and_rescores_in_process(self, settings: Settings, broker: InMemoryBroker) -> None:
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=5, llm_poll_seconds=0.01)
+
+        def bring_up() -> None:
+            fake.responder = lambda system, user: verdict_dict(75)
+            fake.available = True
+
+        timer = threading.Timer(0.05, bring_up)
+        timer.start()
+        try:
+            record = make_record("Bakan", BAKAN_TEXT)
+            svc.handle(keyword_message(record))  # Retry/Unavailable fırlatmamalı
+        finally:
+            timer.cancel()
+
+        assert broker.size(Queue.ARTICLES_SCORED) == 1
+        out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
+        assert out.id == record.id and out.alarm_score == 75 and out.llm is not None and out.llm.model == "fake"
+        assert svc.stats.unavailable == 1 and svc.stats.waits == 1 and svc.stats.fallback == 0
+        assert len(fake.chat_calls) == 1
+
+    def test_wait_times_out_and_defers_to_broker(self, settings: Settings, broker: InMemoryBroker) -> None:
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=0.05, llm_poll_seconds=0.01)
+        with pytest.raises(Unavailable):
+            svc.handle(keyword_message(make_record("Bakan", BAKAN_TEXT)))
+        assert svc.stats.waits == 0 and broker.size(Queue.ARTICLES_SCORED) == 0
+
+    def test_wait_stops_promptly_on_stop_event(self, settings: Settings, broker: InMemoryBroker) -> None:
+        stop = threading.Event()
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, stop_event=stop, llm_wait_seconds=60, llm_poll_seconds=0.5)
+        timer = threading.Timer(0.05, stop.set)
+        timer.start()
+        try:
+            with pytest.raises(Unavailable):
+                svc.handle(keyword_message(make_record("Bakan", BAKAN_TEXT)))
+        finally:
+            timer.cancel()
+        assert svc.wait_for_llm(max_wait=60) is False  # stop_event set: beklemeden döner
+
+    def test_flapping_ollama_gives_up_after_max_rounds(self, settings: Settings, broker: InMemoryBroker) -> None:
+        fake = FakeOllama(available=True)
+        health_checks = {"n": 0}
+
+        def responder(system: str, user: str) -> dict[str, Any]:
+            raise LLMUnavailable("bağlantı koptu")
+
+        fake.responder = responder
+        original_health = fake.health
+
+        def flapping_health() -> bool:  # çağrı anında kapalı, bekleme denetiminde açık
+            health_checks["n"] += 1
+            return health_checks["n"] % 2 == 0 and original_health()
+
+        fake.health = flapping_health  # type: ignore[method-assign]
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=5, llm_poll_seconds=0.01)
+        with pytest.raises(Unavailable):
+            svc.handle(keyword_message(make_record("Bakan", BAKAN_TEXT)))
+        assert len(fake.chat_calls) == MAX_UNAVAILABLE_ROUNDS
+        assert svc.stats.waits == MAX_UNAVAILABLE_ROUNDS - 1
+
+    def test_run_waits_for_ollama_before_consuming(self, settings: Settings, broker: InMemoryBroker) -> None:
+        fake = FakeOllama(available=False)
+        svc = ScoringService(settings, broker, fake, llm_wait_seconds=5, llm_poll_seconds=0.01)
+        record = make_record("Bakan", BAKAN_TEXT)
+        broker.publish(RoutingKey.ARTICLE_KEYWORD, keyword_message(record).body)
+
+        def bring_up() -> None:
+            fake.responder = lambda system, user: verdict_dict(65)
+            fake.available = True
+
+        timer = threading.Timer(0.05, bring_up)
+        timer.start()
+        try:
+            assert svc.run() == 1
+        finally:
+            timer.cancel()
+        assert broker.size(Queue.ARTICLES_KEYWORD) == 0 and len(broker.dead_letters) == 0
+        out = NewsRecord.from_message(broker.queues[Queue.ARTICLES_SCORED][0].body)
+        assert out.id == record.id and out.is_alarm is True
+        assert svc.stats.unavailable == 0  # tüketim Ollama hazır olduktan sonra başladı
+
+    def test_run_with_stop_event_set_does_not_block_on_unavailable_ollama(
+        self, settings: Settings, broker: InMemoryBroker
+    ) -> None:
+        stop = threading.Event()
+        stop.set()
+        svc = ScoringService(settings, broker, FakeOllama(available=False), llm_wait_seconds=60)
+        assert svc.run(stop_event=stop) == 0
+        assert svc.stop_event is stop
 
     def test_invalid_message_is_rejected(self, settings: Settings, broker: InMemoryBroker) -> None:
         svc = ScoringService(settings, broker, FakeOllama())
@@ -722,6 +954,20 @@ class TestHeuristicLLM:
         assert high["summary"].startswith("Bakan hakkında soruşturma: 3 tutuklama")
         # aynı girdi → aynı çıktı
         assert llm.chat_json(system, build_user_prompt(risky, max_content_chars=6000)) == high
+
+    def test_common_words_do_not_trigger_risk_terms(self, settings: Settings) -> None:
+        llm = HeuristicLLM(settings)
+        plain = llm.evaluate(title="Hafta sonu hava güzel", content="O zaman parklara gidelim, zamanla hava bozar.")
+        baseline = llm.evaluate(title="Hafta sonu hava güzel", content="Parklara gidelim, hava bozar.")
+        assert plain["alarm_score"] == baseline["alarm_score"] and plain["topics"] == ["diğer"]
+        assert "zam" not in plain["reason"].split("risk terimleri: ", 1)[1].split(";")[0]
+        assert llm._risk.find("Zamanında gelmedi, zamanla alıştı. Ben bunu atamam, o da atamaz, atamadı.") == []
+        hike = llm.evaluate(title="Doğalgaza zam", content="Zamlar yarın geçerli; zamlı tarife ve zammı açıklandı.")
+        assert hike["alarm_score"] > baseline["alarm_score"] and hike["topics"] == ["ekonomi"]
+        assert "risk terimleri: zam;" in hike["reason"]  # gerekçede regex değil etiket görünür
+        appointed = llm.evaluate(title="Üst düzey atama", content="Atamalar Resmî Gazete'de yayımlandı.")
+        assert appointed["topics"] == ["siyaset"] and "atama" in appointed["reason"]
+        assert "resmi gazete" in appointed["reason"]
 
     def test_sports_text_is_penalised(self, settings: Settings) -> None:
         llm = HeuristicLLM(settings)

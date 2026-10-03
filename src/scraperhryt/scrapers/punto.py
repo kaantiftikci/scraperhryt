@@ -1,7 +1,12 @@
 """12punto kaynağı (gerçek site: https://12punto.com.tr — 12punto.com park edilmiş alan adıdır).
 
 Keşif: ``/rss`` (20 karışık öğe) + ``/rss/<kategori>`` (ayarlardaki her kategori) + ``/<kategori>`` liste sayfaları +
-``backfill_days > 0`` ise gün gün ``/Arama/Ara?search=&StartDate=YYYY-MM-DD&EndDate=YYYY-MM-DD`` arşiv araması.
+``backfill_days > 0`` ise gün gün ``/Arama/Ara?search=&StartDate=GG/AA/YYYY&EndDate=GG/AA/YYYY&sayfa=N`` arşiv araması
+(site tarihleri yalnızca ``GG/AA/YYYY`` biçiminde kabul eder; ISO ya da noktalı biçim "Sonuç bulunamadı" döndürür;
+sayfa başına 20 sonuç, sayfalar ``div.pagination`` içinde listelenir). Sonuçlar yalnızca ``section.category``
+kapsayıcısından okunur; kenar çubuğundaki "Çok Okunanlar" bağlantıları arşiv sonucu sayılmaz. Sitenin arşiv dizini
+haftalarca gecikebilir (bugün ve yakın günler "Sonuç bulunamadı" döndürür); bu yüzden sonuçsuz bir gün taramayı
+DURDURMAZ, istenen pencerenin her günü sorgulanır ve sonunda sonuçsuz gün sayısı loglanır (tümü boşsa uyarı).
 RSS bağlantıları ``http://`` gelir → https'e çevrilir, ``www.`` atılır. Yalnızca ``/<kategori>/<slug>-<id>`` biçimi
 (``^/[a-z0-9-]+/[a-z0-9-]+-\\d{3,}$``) haber kabul edilir; yazar köşeleri (``/yazarlar/<ad>/<slug>-<id>``) elenir.
 Haber sayfası JSON-LD LİSTESİNİN ilk ``NewsArticle`` öğesinden ve ``section.details`` paragraflarından ayrıştırılır.
@@ -11,10 +16,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
-from urllib.parse import urljoin, urlsplit
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from urllib.parse import quote, urljoin, urlsplit
 
 import requests
+from bs4 import Tag
 
 from ..config import Settings, get_settings
 from ..models import NewsRecord
@@ -49,6 +56,9 @@ log = logging.getLogger(__name__)
 
 ARTICLE_PATH_RE = re.compile(r"^/[a-z0-9-]+/[a-z0-9-]+-\d{3,}$")
 _NO_RESULTS_RE = re.compile(r"sonuç bulunamadı")
+_PAGE_PARAM_RE = re.compile(r"[?&]sayfa=(\d+)")
+ARCHIVE_RESULTS_SELECTOR = "section.category"
+ARCHIVE_MAX_PAGES = 50  # gün başına güvenlik tavanı (20 sonuç/sayfa → 1000 haber)
 _PUBLISHED_RE = re.compile(r"yayınlanma\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
 _UPDATED_RE = re.compile(r"güncelle(?:n)?me\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
 _DROP_PARAGRAPH_PATTERNS = tuple(
@@ -79,6 +89,18 @@ _DROP_SELECTORS = (
     ".gnews",
     ".tooltip",
 )
+
+
+@dataclass
+class ArchivePage:
+    """Bir arşiv arama sayfasının çözümü: sonuç kapsayıcısındaki haber bağlantıları ve toplam sayfa sayısı."""
+
+    links: list[DiscoveredLink] = field(default_factory=list)
+    page_count: int = 1
+
+    @property
+    def empty(self) -> bool:
+        return not self.links
 
 
 class PuntoSource:
@@ -134,11 +156,36 @@ class PuntoSource:
                 return self._finalize(collected, limit)
         if backfill_days > 0:
             today = datetime.now(ISTANBUL).date()
+            empty_days: list[date] = []
             for offset in range(backfill_days + 1):
                 day = today - timedelta(days=offset)
-                if add(self._fetch_archive_day(client, day.isoformat())):
+                found = self._fetch_archive_day(client, day)
+                if found is None:
+                    continue  # geçici HTTP hatası: gün atlanır, tarama sürer
+                if not found:
+                    empty_days.append(day)  # arşiv dizini gecikmiş olabilir: sonuçsuz gün taramayı durdurmaz
+                    continue
+                if add(found):
                     return self._finalize(collected, limit)
+            self._log_backfill_summary(backfill_days + 1, empty_days)
         return self._finalize(collected, limit)
+
+    @staticmethod
+    def _log_backfill_summary(scanned_days: int, empty_days: list[date]) -> None:
+        """Geriye dönük taramanın özeti: tüm günler sonuçsuzsa uyarı (dizin gecikmesi), aksi halde bilgi."""
+        if not empty_days:
+            log.info("12punto arşiv taraması tamamlandı: %d günün tamamında sonuç var", scanned_days)
+            return
+        level = logging.WARNING if len(empty_days) >= scanned_days else logging.INFO
+        log.log(
+            level,
+            "12punto arşiv taraması tamamlandı: %d günün %d'i sonuçsuz (%s – %s arası); sitenin arşiv dizini "
+            "haftalarca gecikebilir, yakın günler için sonuç olmaması normaldir",
+            scanned_days,
+            len(empty_days),
+            min(empty_days).isoformat(),
+            max(empty_days).isoformat(),
+        )
 
     @staticmethod
     def _finalize(links: list[DiscoveredLink], limit: int | None) -> list[DiscoveredLink]:
@@ -177,18 +224,37 @@ class PuntoSource:
         log.info("12punto liste %s: %d haber bağlantısı", category, len(found))
         return found
 
-    def archive_url(self, day: str) -> str:
-        return f"{self.base_url}/Arama/Ara?search=&StartDate={day}&EndDate={day}"
+    def archive_url(self, day: date | str, page: int = 1) -> str:
+        """Bir günün arşiv arama URL'si. ``day`` ISO metin (``2026-10-02``) ya da ``date`` olabilir; site
+        yalnızca ``GG/AA/YYYY`` biçimini tanıdığından tarih bu biçime çevrilip URL içinde kodlanır."""
+        if isinstance(day, str):
+            day = date.fromisoformat(day)
+        stamp = quote(day.strftime("%d/%m/%Y"), safe="")
+        return f"{self.base_url}/Arama/Ara?search=&StartDate={stamp}&EndDate={stamp}&sayfa={max(1, int(page))}"
 
-    def _fetch_archive_day(self, client: HttpClient, day: str) -> list[DiscoveredLink]:
-        url = self.archive_url(day)
-        try:
-            html = client.get_text(url)
-        except (HttpError, requests.RequestException) as exc:
-            log.warning("12punto arşiv araması alınamadı (%s): %s", day, exc)
-            return []
-        found = self.parse_search(html)
-        log.info("12punto arşiv %s: %d haber bağlantısı", day, len(found))
+    def _fetch_archive_day(self, client: HttpClient, day: date) -> list[DiscoveredLink] | None:
+        """Bir günün tüm arşiv sayfalarını çeker. HTTP hatasında (ilk sayfada) None, sonuç yoksa boş liste."""
+        links: list[DiscoveredLink] = []
+        page_count = 1
+        page = 1
+        while page <= min(page_count, ARCHIVE_MAX_PAGES):
+            url = self.archive_url(day, page)
+            try:
+                html = client.get_text(url)
+            except (HttpError, requests.RequestException) as exc:
+                log.warning("12punto arşiv araması alınamadı (%s, sayfa %d): %s", day.isoformat(), page, exc)
+                if page == 1:
+                    return None
+                break
+            parsed = self.parse_search_page(html)
+            if parsed.empty:
+                break
+            links.extend(parsed.links)
+            if page == 1:
+                page_count = parsed.page_count
+            page += 1
+        found = dedupe_links(links)
+        log.info("12punto arşiv %s: %d haber bağlantısı (%d sayfa)", day.isoformat(), len(found), page - 1)
         return found
 
     def parse_rss(self, xml_text: str | bytes, category_hint: str = "") -> list[DiscoveredLink]:
@@ -215,10 +281,11 @@ class PuntoSource:
             )
         return dedupe_links(links)
 
-    def _links_from_anchors(self, html: str, *, category_hint: str, origin: str) -> list[DiscoveredLink]:
-        soup = make_soup(html)
+    def _links_from_anchors(self, root: str | Tag, *, category_hint: str, origin: str) -> list[DiscoveredLink]:
+        """``root`` (HTML metni ya da bir kapsayıcı etiket) altındaki haber bağlantılarını toplar."""
+        container = root if isinstance(root, Tag) else make_soup(root)
         links: list[DiscoveredLink] = []
-        for anchor in soup.select("a[href]"):
+        for anchor in container.select("a[href]"):
             url = self.normalize_url(anchor.get("href"))
             if not url:
                 continue
@@ -226,6 +293,7 @@ class PuntoSource:
                 DiscoveredLink(
                     url=url,
                     title_hint=clean_text(anchor.get("title") or anchor.get_text(" ")),
+                    published_hint=parse_tr_date(anchor.get("data-yayintarihi2") or anchor.get("data-yayintarihi")),
                     category_hint=category_hint or self._category_from_path(url),
                     origin=origin,
                 )
@@ -236,11 +304,31 @@ class PuntoSource:
         """Kategori sayfasındaki haber bağlantıları (``a.category-item`` dahil sayfadaki tüm haber URL'leri)."""
         return self._links_from_anchors(html, category_hint=category_hint, origin="listing")
 
+    def parse_search_page(self, html: str) -> ArchivePage:
+        """Arşiv arama sayfasını çözer: yalnızca ``section.category`` sonuç kapsayıcısındaki haber bağlantıları
+        (kenar çubuğu/menü bağlantıları hariç) ve ``div.pagination``'dan okunan toplam sayfa sayısı.
+
+        Kapsayıcı yoksa ya da çözülmüş metni "Sonuç bulunamadı" içeriyorsa (sayfa ``ç``'yi ``&#231;`` olarak
+        kodlar; bu yüzden ham HTML değil metin denetlenir) boş sonuç döner.
+        """
+        soup = make_soup(html)
+        container = soup.select_one(ARCHIVE_RESULTS_SELECTOR)
+        if container is None:
+            log.info("12punto arşiv sayfasında sonuç kapsayıcısı (%s) yok", ARCHIVE_RESULTS_SELECTOR)
+            return ArchivePage()
+        if _NO_RESULTS_RE.search(tr_lower(container.get_text(" "))):
+            return ArchivePage()
+        links = self._links_from_anchors(container, category_hint="", origin="archive")
+        page_count = 1
+        for anchor in container.select("div.pagination a[href]"):
+            match = _PAGE_PARAM_RE.search(str(anchor.get("href") or ""))
+            if match:
+                page_count = max(page_count, int(match.group(1)))
+        return ArchivePage(links=links, page_count=page_count)
+
     def parse_search(self, html: str) -> list[DiscoveredLink]:
-        """Arşiv arama sonucu sayfasındaki haber bağlantıları."""
-        if _NO_RESULTS_RE.search(tr_lower(html)):
-            log.info("12punto arşiv araması sonuç döndürmedi; sayfadaki diğer haber bağlantıları alınıyor")
-        return self._links_from_anchors(html, category_hint="", origin="archive")
+        """Arşiv arama sonucu sayfasındaki haber bağlantıları (yalnızca sonuç kapsayıcısından)."""
+        return self.parse_search_page(html).links
 
     # --- haber ---
     def fetch_article(self, client: HttpClient, link: DiscoveredLink) -> NewsRecord | None:

@@ -203,11 +203,19 @@ def build_report_user_prompt(
     alarms = _as_int(stats.get("alarms"))
     avg = stats.get("avg_alarm_score")
     avg_text = f"{float(avg):.1f}" if isinstance(avg, int | float) and alarms > 0 else "-"
+    if kind == "alarm_digest":
+        # Özet istatistikleri alarm listesinden türetilir (bkz. builder.alarm_stats); "toplam haber" anlamsızdır.
+        top_score = max((_as_int(alarm.get("alarm_score")) for alarm in top_alarms), default=0)
+        totals = f"Özetlenen alarm sayısı: {len(top_alarms)} | Ortalama alarm skoru: {avg_text} | En yüksek skor: {top_score}"
+    else:
+        totals = (
+            f"Toplam haber: {total} | Alarm: {alarms} ({alarm_ratio_text(total, alarms)}) | "
+            f"Ortalama alarm skoru: {avg_text}"
+        )
     lines = [
         f"Rapor türü: {kind_label(kind)} ({kind})",
         f"Pencere: {format_tr(window_start)} – {format_tr(window_end)} (Türkiye saati)",
-        f"Toplam haber: {total} | Alarm: {alarms} ({alarm_ratio_text(total, alarms)}) | "
-        f"Ortalama alarm skoru: {avg_text}",
+        totals,
         f"Kaynak dağılımı: {format_distribution(stats.get('by_source'))}",
         f"Anahtar kelime dağılımı: {format_distribution(stats.get('by_keyword'))}",
         f"Kategori dağılımı: {format_distribution(stats.get('by_category'))}",
@@ -218,8 +226,6 @@ def build_report_user_prompt(
             f"En yoğun saat: {format_tr(peak.get('ts'))} ({_as_int(peak.get('count'))} haber, "
             f"{_as_int(peak.get('alarms'))} alarm)"
         )
-    if kind == "alarm_digest":
-        lines.append(f"Özetlenen alarm sayısı: {len(top_alarms)}")
     alarm_lines = format_alarm_lines(top_alarms)
     lines.append("En yüksek skorlu alarmlar:" if alarm_lines else "En yüksek skorlu alarmlar: yok")
     lines.extend(alarm_lines)

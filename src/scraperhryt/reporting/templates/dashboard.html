@@ -311,7 +311,9 @@
           return;
         }
         var answer = result.body;
-        var modelNote = answer.model === "fallback" ? "dil modeli kullanılamadı, haberlerden derlendi" : "model: " + answer.model;
+        var modelNote = answer.retrieved_count === 0
+          ? "eşleşen haber bulunamadı, dil modeli çağrılmadı"
+          : (answer.model === "fallback" ? "dil modeli kullanılamadı, haberlerden derlendi" : "model: " + answer.model);
         statusEl.textContent = "Bulunan haber: " + answer.retrieved_count + " · " + modelNote +
           (answer.search_terms && answer.search_terms.length ? " · arama: " + answer.search_terms.join(", ") : "");
         textEl.textContent = answer.answer;

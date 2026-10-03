@@ -20,6 +20,12 @@ from .state import SeenStore
 
 log = logging.getLogger(__name__)
 
+# Besleme güncelleme damgası (RSS <modified>) taşımayan bağlantılarda sayfayı çekmeden atlama penceresi (saat).
+# 12punto RSS/liste öğeleri yalnızca pubDate verir; haber güncellense de damga değişmez, değişiklik ancak sayfa
+# çekilip içerik özeti karşılaştırılınca anlaşılır. Bu yüzden bu bağlantılar depo penceresinden (6 s) çok daha
+# sık yeniden denetlenir.
+RECHECK_HOURS_WITHOUT_UPDATE_STAMP = 1.0
+
 _SOURCE_FACTORIES: dict[str, type[HurriyetSource] | type[PuntoSource]] = {
     "hurriyet": HurriyetSource,
     "12punto": PuntoSource,
@@ -64,6 +70,7 @@ class ScrapeStats:
     finished_at: datetime | None = None
     per_source: dict[str, SourceStats] = field(default_factory=dict)
     budget_exhausted: bool = False
+    interrupted: bool = False  # durdurma sinyali geldi; tur yarıda kesildi (kalan bağlantılar sonraki tura kaldı)
 
     def source(self, name: str) -> SourceStats:
         return self.per_source.setdefault(name, SourceStats())
@@ -108,6 +115,8 @@ class ScrapeStats:
         ]
         detail = "; ".join(parts) if parts else "kaynak yok"
         suffix = " (haber bütçesi doldu)" if self.budget_exhausted else ""
+        if self.interrupted:
+            suffix += " (durdurma sinyaliyle yarıda kesildi)"
         return (
             f"Kazıma turu {self.duration_seconds:.1f}s sürdü — toplam yayınlanan={self.published}, "
             f"değişmeyen={self.unchanged}, hata={self.errors}{suffix} | {detail}"
@@ -117,13 +126,18 @@ class ScrapeStats:
 class ScrapeRunner:
     """Tüm kaynakları sırayla tarar ve ``NewsRecord.to_message()`` mesajlarını ``article.raw`` ile yayınlar.
 
-    - ``SeenStore`` sayesinde son 6 saatte görülüp besleme damgası (RSS modified/pubDate) değişmeyen bağlantılar
-      hiç çekilmez;
-      çekilenlerde içerik özeti aynıysa yayınlanmaz, değiştiyse (güncellenen haber) aynı id ile yeniden yayınlanır.
+    - ``SeenStore`` sayesinde son 6 saatte görülüp besleme damgası (RSS modified) değişmeyen bağlantılar hiç
+      çekilmez; güncelleme damgası olmayan bağlantılar (12punto: yalnızca pubDate) ise en geç
+      ``RECHECK_HOURS_WITHOUT_UPDATE_STAMP`` saat sonra yeniden çekilir ki düzenlenen haberler yakalansın.
+      Çekilenlerde içerik özeti aynıysa yayınlanmaz, değiştiyse (güncellenen haber) aynı id ile yeniden yayınlanır.
+    - ``settings.backfill_days`` (12punto arşiv taraması) ``run_forever``'da yalnızca ilk tamamlanan turda
+      uygulanır; sonraki turlar arşivi yeniden taramaz.
     - ``settings.max_articles_per_run`` tur başına toplam sayfa çekme bütçesidir. Bütçe kaynaklar arasında adil
       paylaştırılır: her kaynak en fazla ``ceil(kalan bütçe / kalan kaynak sayısı)`` sayfa çeker, kullanılmayan pay
       sonraki kaynağa devreder (böylece küçük bütçede ikinci kaynak aç kalmaz).
     - Haber başına hatalar sayılır ve tur devam eder; broker hataları turu keser (``run_forever`` yakalar).
+    - ``stop_event`` set edilince tur en geç bir sonraki bağlantıda biter (SIGTERM/SIGINT'te kibar kapanış);
+      yayınlama ``SeenStore.mark``'tan önce yapıldığından veri kaybı olmaz, kalanlar sonraki tura kalır.
     """
 
     def __init__(
@@ -148,14 +162,30 @@ class ScrapeRunner:
             self.broker.declare_topology()
             self._topology_ready = True
 
-    def run_once(self, *, backfill_days: int | None = None) -> ScrapeStats:
-        """Tek kazıma turu. ``backfill_days`` verilmezse ``settings.backfill_days`` kullanılır."""
+    def run_once(
+        self, *, backfill_days: int | None = None, stop_event: threading.Event | None = None
+    ) -> ScrapeStats:
+        """Tek kazıma turu. ``backfill_days`` verilmezse ``settings.backfill_days`` kullanılır.
+
+        ``stop_event`` set edildiğinde kaynak ve bağlantı döngüleri hemen bırakılır; kısmi istatistik döner.
+        """
         self._ensure_topology()
         stats = ScrapeStats()
+
+        def stop_requested() -> bool:
+            if stop_event is not None and stop_event.is_set():
+                if not stats.interrupted:
+                    stats.interrupted = True
+                    log.warning("Durdurma sinyali alındı; kazıma turu yarıda kesiliyor")
+                return True
+            return False
+
         days = self.settings.backfill_days if backfill_days is None else max(0, int(backfill_days))
         budget = max(0, int(self.settings.max_articles_per_run))
         attempts = 0
         for index, source in enumerate(self.sources):
+            if stop_requested():
+                break
             source_stats = stats.source(source.name)
             remaining_sources = len(self.sources) - index
             quota = math.ceil((budget - attempts) / remaining_sources) if budget > attempts else 0
@@ -173,6 +203,8 @@ class ScrapeRunner:
             source_stats.discovered = len(links)
             log.info("%s: %d bağlantı keşfedildi", source.name, len(links))
             for link in links:
+                if stop_requested():
+                    break
                 if source_attempts >= quota:
                     log.warning(
                         "Haber bütçesi (%d, %s payı %d) doldu; %s için kalan bağlantılar sonraki tura kaldı",
@@ -184,7 +216,9 @@ class ScrapeRunner:
                     stats.budget_exhausted = True
                     break
                 feed_stamp = link.updated_hint or link.published_hint
-                if self.seen.seen_recently(link.id, published_at=feed_stamp):
+                if self.seen.seen_recently(
+                    link.id, published_at=feed_stamp, within_hours=self._skip_window_hours(link)
+                ):
                     source_stats.unchanged += 1
                     continue
                 attempts += 1
@@ -192,6 +226,17 @@ class ScrapeRunner:
                 self._process_link(source, link, source_stats, feed_stamp)
         stats.finished_at = utcnow()
         return stats
+
+    def _skip_window_hours(self, link: DiscoveredLink) -> float:
+        """Bağlantıyı sayfasını çekmeden atlama penceresi (saat).
+
+        Besleme güncelleme damgası taşıyan bağlantılarda (Hürriyet RSS ``<modified>``) damga değişmediği sürece
+        depo penceresi geçerlidir; damgasız bağlantılarda değişiklik yalnızca sayfadan anlaşılabildiğinden pencere
+        ``RECHECK_HOURS_WITHOUT_UPDATE_STAMP`` ile sınırlanır (depo penceresi daha kısaysa o korunur).
+        """
+        if link.updated_hint is not None:
+            return self.seen.recent_hours
+        return min(self.seen.recent_hours, RECHECK_HOURS_WITHOUT_UPDATE_STAMP)
 
     def _process_link(
         self, source: Source, link: DiscoveredLink, source_stats: SourceStats, feed_stamp: datetime | None
@@ -229,11 +274,18 @@ class ScrapeRunner:
         """``stop_event`` set edilene kadar ``scrape_interval_seconds`` aralıklarla tur atar."""
         stop_event = stop_event or threading.Event()
         interval = max(1, int(self.settings.scrape_interval_seconds))
-        log.info("Kazıyıcı başladı: kaynaklar=%s, aralık=%ds", [s.name for s in self.sources], interval)
+        backfill_days = max(0, int(self.settings.backfill_days))
+        log.info(
+            "Kazıyıcı başladı: kaynaklar=%s, aralık=%ds, geriye dönük tarama=%d gün (yalnızca ilk turda)",
+            [s.name for s in self.sources],
+            interval,
+            backfill_days,
+        )
         while not stop_event.is_set():
             try:
-                stats = self.run_once()
+                stats = self.run_once(backfill_days=backfill_days, stop_event=stop_event)
                 log.info(stats.summary())
+                backfill_days = 0  # arşiv taraması tamamlandı; sonraki turlar yalnızca güncel beslemeleri tarar
             except Exception:
                 log.exception("Kazıma turu başarısız; %ds sonra yeniden denenecek", interval)
             if stop_event.wait(interval):

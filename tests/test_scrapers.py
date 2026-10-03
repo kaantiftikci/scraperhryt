@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from scraperhryt.scrapers import (
     parse_tr_date,
 )
 from scraperhryt.scrapers.base import ISTANBUL, decode_bytes, dedupe_links, paragraphize_flat_text
+from scraperhryt.scrapers.punto import ArchivePage
 
 FIXTURES = Path(__file__).parent / "fixtures"
 HURRIYET_ARTICLE_URL = (
@@ -45,6 +47,39 @@ PUNTO_ARTICLE_URL = (
 
 def fixture_bytes(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
+
+
+def punto_archive_results_html(day: str = "12.07.2026", *, page_count: int = 3, ids: tuple[int, ...] = (144293, 144292, 144288)) -> str:
+    """Gerçek 12punto arşiv sonuç sayfasının (12.07.2026, canlı yakalama) iskeleti: ``section.category`` içinde
+    ``data-idhaber``/``data-yayintarihi2`` taşıyan sonuç bağlantıları + ``div.pagination``; kenar çubuğunda
+    (``section.readsmore``) arşiv sonucu OLMAYAN haber ve yazar bağlantıları."""
+    stamp = date.fromisoformat("-".join(reversed(day.split(".")))).strftime("%d%%2f%%m%%2f%Y")
+    items = "\n".join(
+        f'<a title="Haber {i}" data-idhaber="{i}" data-yayintarihi="" data-yayintarihi2="{day} 00:00:00" '
+        f'target="_blank" href="/gundem/arsiv-haberi-{i}"><img src="x.jpg"><p>Haber {i}</p></a>'
+        for i in ids
+    )
+    pages = "\n".join(
+        f'<a href="/Arama/Ara?key=&amp;StartDate={stamp}&amp;EndDate={stamp}&amp;sayfa={n}" target="_parent">{n}</a>'
+        for n in range(1, page_count + 1)
+    )
+    return f"""<!DOCTYPE html><html lang="tr"><head><meta charset="utf-8"><title>Haber Arama</title></head><body>
+<header><nav><a href="/">Anasayfa</a><a href="/gundem">Gündem</a>
+<section class="subNews"><a href="/siyaset/menu-mansetten-haber-900001">Menü manşeti</a></section></nav></header>
+<section class="breadcrumb"><a target="_blank" href="/">Anasayfa</a> &gt; {day} - {day} tarihleri arasında  Haberleri</section>
+<section class="category">
+    <div class="container">
+{items}
+    </div>
+    <div class="pagination"><div class="box"><a class="disabled">❮❮</a>
+{pages}
+    <a href="/Arama/Ara?key=&amp;StartDate={stamp}&amp;EndDate={stamp}&amp;sayfa={page_count}">❯❯</a></div></div>
+</section>
+<section class="readsmore"><div class="subNews"></div><div class="box"><h3>Çok Okunanlar</h3><div class="list">
+<a target="_blank" href="/yerel-haberler/kenar-cubugu-haberi-154219" title="Kenar çubuğu haberi"><p>Kenar çubuğu haberi</p></a>
+<a target="_blank" href="/yazarlar/muyesser-yildiz/trumpla-hayirli-isler-154145" title="Yazar"><p>Yazar</p></a>
+</div></div></section>
+</body></html>"""
 
 
 def fixture_text(name: str) -> str:
@@ -213,6 +248,26 @@ def test_decode_bytes_drops_broken_bytes_and_honours_charset() -> None:
 def test_paragraphize_flat_text_restores_boundaries() -> None:
     text = paragraphize_flat_text("İlk cümle bitti.İkinci cümle başladı. Üçüncü cümle.")
     assert text == "İlk cümle bitti.\nİkinci cümle başladı. Üçüncü cümle."
+    quoted = paragraphize_flat_text("Operasyon tamamlandı.“Kararlıyız” dedi.”Ardından ayrıldı.")
+    assert quoted == "Operasyon tamamlandı.\n“Kararlıyız” dedi.”\nArdından ayrıldı."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Dolar 1.5 milyon liraya çıktı.",
+        "Toplantı saat 22:30'da başladı, 14.30'da bitti.",
+        "Enflasyon yüzde 3.2 oldu.",
+        "02.10.2026 tarihinde açıklandı.",
+        "ERDOĞAN'DAN AÇIKLAMA GELDİ",
+        "ŞIK'IN PAYLAŞIMINDA ÖNE ÇIKAN İDDİALAR",
+        "CHP'DEN TEPKİ: 'Kabul edilemez'",
+        "T.C. Cumhurbaşkanlığı kararı Resmi Gazete'de.",
+    ],
+    ids=["ondalık", "saat", "yüzde", "tarih", "kesme-büyük", "kesme-büyük-2", "kesme-iki-nokta", "kısaltma"],
+)
+def test_paragraphize_flat_text_keeps_numbers_times_dates_and_apostrophes(text: str) -> None:
+    assert paragraphize_flat_text(text) == text
 
 
 def test_dedupe_links_merges_hints_and_sorts_newest_first() -> None:
@@ -480,11 +535,39 @@ def test_punto_listing_yields_25_links(punto: PuntoSource) -> None:
     assert all(link.title_hint for link in links)
 
 
-def test_punto_archive_search_yields_4_links(punto: PuntoSource) -> None:
-    links = punto.parse_search(fixture_text("punto_arama.html"))
-    assert len(links) == 4
-    assert all(link.origin == "archive" for link in links)
-    assert not any("/yazarlar/" in link.url for link in links)
+def test_punto_archive_no_results_page_yields_nothing(punto: PuntoSource) -> None:
+    # Gerçek "Sonuç bulunamadı" sayfası: ç karakteri &#231; olarak kodlu, kenar çubuğunda 4+ haber bağlantısı var.
+    html = fixture_text("punto_arama.html")
+    assert "Sonu&#231; bulunamadı" in html
+    assert len(punto.parse_listing(html)) >= 4  # kenar çubuğu bağlantıları sayfada mevcut...
+    assert punto.parse_search(html) == []  # ...ama arşiv sonucu sayılmaz
+    assert punto.parse_search_page(html) == ArchivePage(links=[], page_count=1)
+    assert punto.parse_search("<html><body><p>kapsayıcı yok</p></body></html>") == []
+
+
+def test_punto_archive_results_come_only_from_results_container(punto: PuntoSource) -> None:
+    page = punto.parse_search_page(punto_archive_results_html(page_count=4))
+    assert page.page_count == 4
+    assert [link.url for link in page.links] == [
+        "https://12punto.com.tr/gundem/arsiv-haberi-144293",
+        "https://12punto.com.tr/gundem/arsiv-haberi-144292",
+        "https://12punto.com.tr/gundem/arsiv-haberi-144288",
+    ]
+    assert all(link.origin == "archive" and link.title_hint.startswith("Haber ") for link in page.links)
+    assert all(link.published_hint == datetime(2026, 7, 12, tzinfo=ISTANBUL) for link in page.links)
+    assert all(link.category_hint == "gundem" for link in page.links)
+    urls = {link.url for link in page.links}
+    assert not any("kenar-cubugu" in url or "mansetten" in url or "/yazarlar/" in url for url in urls)
+    assert punto.parse_search(punto_archive_results_html()) == page.links[:3]
+
+
+def test_punto_archive_url_uses_site_date_format_and_paging(punto: PuntoSource, settings: Settings) -> None:
+    base = settings.punto_base_url
+    expected = f"{base}/Arama/Ara?search=&StartDate=02%2F10%2F2026&EndDate=02%2F10%2F2026&sayfa=1"
+    assert punto.archive_url(date(2026, 10, 2)) == expected
+    assert punto.archive_url("2026-10-02") == expected
+    assert punto.archive_url(date(2026, 10, 2), page=3).endswith("&sayfa=3")
+    assert punto.archive_url(date(2026, 10, 2), page=0).endswith("&sayfa=1")
 
 
 @pytest.mark.parametrize(
@@ -547,25 +630,92 @@ def test_punto_discover_collects_feeds_listings_and_skips_missing(settings: Sett
     assert not any("/Arama/Ara" in call for call in client.calls)
 
 
-def test_punto_discover_backfill_requests_each_day(settings: Settings, punto: PuntoSource) -> None:
+def test_punto_discover_backfill_scans_every_day_despite_empty_recent_days(
+    settings: Settings, punto: PuntoSource, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Canlı sitede arşiv dizini haftalarca gecikir: bugün ve dün "Sonuç bulunamadı" döndürür. Sonuçsuz gün
+    taramayı DURDURMAMALI; istenen pencerenin her günü sorgulanmalı ve eski günlerin sonuçları toplanmalı."""
     routes = punto_routes(settings)
+    archive_hits: list[str] = []
+    today = datetime.now(ISTANBUL).date()
+    day2, day3 = today - timedelta(days=2), today - timedelta(days=3)
+
+    def fallback(url: str) -> bytes | str | None:
+        if "/Arama/Ara?" not in url:
+            return None
+        archive_hits.append(url)
+        if url.startswith(punto.archive_url(day2)[: -len("&sayfa=1")]):
+            page = int(url.rsplit("sayfa=", 1)[1])
+            return punto_archive_results_html(day2.strftime("%d.%m.%Y"), page_count=2, ids=(100 + page, 200 + page))
+        if url.startswith(punto.archive_url(day3)[: -len("&sayfa=1")]):
+            return punto_archive_results_html(day3.strftime("%d.%m.%Y"), page_count=1, ids=(300,))
+        return fixture_bytes("punto_arama.html")  # bugün, dün ve 4-5 gün öncesi: "Sonuç bulunamadı"
+
+    client = FakeHttpClient(routes, fallback=fallback)
+    with caplog.at_level(logging.INFO, logger="scraperhryt.scrapers.punto"):
+        links = punto.discover(client, backfill_days=5)
+    # bugün boş, dün boş, 2 gün önce 2 sayfa, 3 gün önce 1 sayfa, 4-5 gün önce boş → her gün sorgulanır
+    assert archive_hits == [
+        punto.archive_url(today, 1),
+        punto.archive_url(today - timedelta(days=1), 1),
+        punto.archive_url(day2, 1),
+        punto.archive_url(day2, 2),
+        punto.archive_url(day3, 1),
+        punto.archive_url(today - timedelta(days=4), 1),
+        punto.archive_url(today - timedelta(days=5), 1),
+    ]
+    summary = [rec for rec in caplog.records if "arşiv taraması tamamlandı" in rec.getMessage()]
+    assert len(summary) == 1 and summary[0].levelno == logging.INFO
+    assert "6 günün 4'i sonuçsuz" in summary[0].getMessage()
+    urls = {link.url for link in links}
+    assert {
+        "https://12punto.com.tr/gundem/arsiv-haberi-101",
+        "https://12punto.com.tr/gundem/arsiv-haberi-201",
+        "https://12punto.com.tr/gundem/arsiv-haberi-102",
+        "https://12punto.com.tr/gundem/arsiv-haberi-202",
+        "https://12punto.com.tr/gundem/arsiv-haberi-300",
+    } <= urls
+    assert not any("kenar-cubugu" in url for url in urls)  # kenar çubuğu bağlantıları arşiv sonucu değil
+    assert sum(link.origin == "archive" for link in links) == 5
+
+
+def test_punto_discover_backfill_warns_when_every_day_is_empty(
+    settings: Settings, punto: PuntoSource, caplog: pytest.LogCaptureFixture
+) -> None:
     archive_hits: list[str] = []
 
     def fallback(url: str) -> bytes | None:
-        if "/Arama/Ara?search=&StartDate=" in url:
-            archive_hits.append(url)
-            return fixture_bytes("punto_arama.html")
-        return None
+        if "/Arama/Ara?" not in url:
+            return None
+        archive_hits.append(url)
+        return fixture_bytes("punto_arama.html")
 
-    client = FakeHttpClient(routes, fallback=fallback)
-    links = punto.discover(client, backfill_days=2)
-    assert len(archive_hits) == 3  # bugün + 2 gün
+    client = FakeHttpClient(punto_routes(settings), fallback=fallback)
+    with caplog.at_level(logging.WARNING, logger="scraperhryt.scrapers.punto"):
+        links = punto.discover(client, backfill_days=3)
+    assert len(archive_hits) == 4  # 4 günün hepsi sorgulandı, hiçbiri taramayı kesmedi
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "4 günün 4'i sonuçsuz" in warnings[0].getMessage()
+    assert not any(link.origin == "archive" for link in links)
+
+
+def test_punto_discover_backfill_skips_day_on_http_error(settings: Settings, punto: PuntoSource) -> None:
     today = datetime.now(ISTANBUL).date()
-    for offset, url in enumerate(archive_hits):
-        day = (today - timedelta(days=offset)).isoformat()
-        assert url == f"{settings.punto_base_url}/Arama/Ara?search=&StartDate={day}&EndDate={day}"
-    archive_urls = {link.url for link in punto.parse_search(fixture_text("punto_arama.html"))}
-    assert archive_urls <= {link.url for link in links}  # arşiv bağlantıları (RSS/listeyle çakışanlar birleşik) sonuçta
+    archive_hits: list[str] = []
+
+    def fallback(url: str) -> bytes | str | Exception | None:
+        if "/Arama/Ara?" not in url:
+            return None
+        archive_hits.append(url)
+        if url == punto.archive_url(today):
+            return requests.ConnectionError("bağlantı koptu")
+        if url == punto.archive_url(today - timedelta(days=1)):
+            return punto_archive_results_html(ids=(400,), page_count=1)
+        return fixture_bytes("punto_arama.html")
+
+    links = punto.discover(FakeHttpClient(punto_routes(settings), fallback=fallback), backfill_days=3)
+    assert len(archive_hits) == 4  # bugün hata (atlandı), dün sonuç, 2-3 gün önce boş; her gün sorgulandı
+    assert "https://12punto.com.tr/gundem/arsiv-haberi-400" in {link.url for link in links}
 
 
 def test_punto_discover_limit_stops_after_first_feed(settings: Settings, punto: PuntoSource) -> None:
@@ -842,6 +992,117 @@ def test_run_forever_stops_on_event(settings: Settings) -> None:
     runner.run_forever(stop_event)
     assert runs == [1]
     assert time.monotonic() - started < 1.0
+    runner.close()
+
+
+def test_run_forever_backfills_only_on_first_tour(settings: Settings) -> None:
+    """``BACKFILL_DAYS`` arşiv taraması her turda değil yalnızca ilk turda uygulanır (aksi halde her 5 dakikada
+    bir tüm arşiv penceresi yeniden sorgulanır)."""
+    fast = settings.model_copy(update={"scrape_interval_seconds": 1, "backfill_days": 7})
+    stop_event = threading.Event()
+    backfill_calls: list[int] = []
+
+    class RecordingSource:
+        name = "sahte"
+
+        def discover(self, client: Any, *, backfill_days: int = 0, limit: int | None = None) -> list[DiscoveredLink]:
+            backfill_calls.append(backfill_days)
+            if len(backfill_calls) == 2:
+                stop_event.set()
+            return []
+
+        def fetch_article(self, client: Any, link: DiscoveredLink) -> NewsRecord | None:
+            return None
+
+    runner = ScrapeRunner(fast, InMemoryBroker(fast), sources=[RecordingSource()], client=FakeHttpClient())
+    runner.run_forever(stop_event)
+    assert backfill_calls == [7, 0]
+    # run_once tek başına çağrıldığında (scrape --once) ayarlardaki değer kullanılmaya devam eder
+    runner.run_once()
+    assert backfill_calls[-1] == 7
+    runner.close()
+
+
+def test_runner_rechecks_links_without_update_stamp_sooner(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Besleme güncelleme damgası taşımayan bağlantı (12punto: yalnızca pubDate) 6 saat değil en geç 1 saat sonra
+    yeniden çekilir; damgalı bağlantı (Hürriyet RSS <modified>) damga değişmedikçe 6 saat atlanır."""
+    published = datetime(2026, 10, 2, 22, 41, tzinfo=ISTANBUL)
+    unstamped = DiscoveredLink(url="https://12punto.com.tr/gundem/damgasiz-haber-100001", published_hint=published)
+    stamped = DiscoveredLink(
+        url="https://12punto.com.tr/gundem/damgali-haber-100002", published_hint=published, updated_hint=published
+    )
+    contents = {unstamped.url: "İlk metin.", stamped.url: "İlk metin."}
+
+    class StampSource:
+        name = "sahte"
+
+        def discover(self, client: Any, *, backfill_days: int = 0, limit: int | None = None) -> list[DiscoveredLink]:
+            return [unstamped, stamped]
+
+        def fetch_article(self, client: Any, link: DiscoveredLink) -> NewsRecord | None:
+            return NewsRecord.new(
+                source=self.name, content_url=link.url, title="Başlık", content=contents[link.url], published_at=published
+            )
+
+    store = SeenStore(tmp_path / "state.sqlite3", recent_hours=6)
+    broker = InMemoryBroker(settings)
+    runner = ScrapeRunner(settings, broker, seen_store=store, sources=[StampSource()], client=FakeHttpClient())
+    first = runner.run_once()
+    assert first.published == 2 and first.fetched == 2
+    broker.drain(Queue.ARTICLES_RAW)
+
+    for url in contents:
+        contents[url] = "Güncellenen metin."
+    immediately = runner.run_once()  # 1 saat dolmadı: ikisi de sayfa çekilmeden atlanır
+    assert immediately.fetched == 0 and immediately.unchanged == 2 and immediately.published == 0
+
+    real_now = datetime.now(UTC)
+    monkeypatch.setattr("scraperhryt.scrapers.state.utcnow", lambda: real_now + timedelta(hours=2))
+    later = runner.run_once()  # 2 saat sonra: damgasız bağlantı yeniden çekilir ve güncelleme yayınlanır
+    assert later.fetched == 1 and later.published == 1 and later.unchanged == 1
+    messages = broker.drain(Queue.ARTICLES_RAW)
+    assert len(messages) == 1
+    assert messages[0].body["content_url"] == unstamped.url and messages[0].headers["x-change"] == "updated"
+
+    monkeypatch.setattr("scraperhryt.scrapers.state.utcnow", lambda: real_now + timedelta(hours=7))
+    much_later = runner.run_once()  # 6 saat geçti: damgalı bağlantı da yeniden çekilir ve güncellenir
+    assert much_later.fetched == 2 and much_later.published == 1
+    messages = broker.drain(Queue.ARTICLES_RAW)
+    assert [msg.body["content_url"] for msg in messages] == [stamped.url]
+    assert messages[0].headers["x-change"] == "updated"
+    runner.close()
+
+
+def test_run_once_stops_mid_tour_when_stop_event_set(settings: Settings) -> None:
+    runner, broker, client = runner_with_small_feed(settings)
+    stop_event = threading.Event()
+    fetched_before_stop: list[str] = []
+    original_get_text = client.get_text
+
+    def get_text(url: str, **kwargs: Any) -> str:
+        text = original_get_text(url, **kwargs)
+        is_article = url.startswith("https://www.hurriyet.com.tr/gundem/") and url != settings.hurriyet_gundem_listing
+        if is_article and not fetched_before_stop:
+            fetched_before_stop.append(url)
+            stop_event.set()  # ilk haber çekildikten sonra (yalnızca bir kez) durdurma sinyali gelir
+        return text
+
+    client.get_text = get_text  # type: ignore[method-assign]
+    stats = runner.run_once(stop_event=stop_event)
+    assert stats.interrupted is True
+    assert "yarıda kesildi" in stats.summary()
+    assert stats.per_source["hurriyet"].discovered == 3
+    assert len(fetched_before_stop) == 1 and stats.published == 1 and broker.size(Queue.ARTICLES_RAW) == 1
+    assert stats.finished_at is not None
+    # sinyal baştan set edilmişse hiçbir kaynak keşfedilmez
+    stats2 = runner.run_once(stop_event=stop_event)
+    assert stats2.interrupted is True and stats2.per_source == {}
+    stop_event.clear()
+    # sinyal yokken kalan haberler sonraki turda yayınlanır (veri kaybı yok)
+    stats3 = runner.run_once(stop_event=stop_event)
+    assert stats3.interrupted is False and stats3.published == 2
     runner.close()
 
 

@@ -97,8 +97,11 @@ def compile_keyword(keyword: str) -> re.Pattern[str]:
     if kw.startswith("~"):
         return re.compile(re.escape(tr_lower(kw[1:]).strip()), re.UNICODE)
     alts = "|".join(re.escape(c) for c in sorted(_stem_candidates(kw), key=len, reverse=True))
+    # Ek döngüsü sahiplenici (``*+``, Python 3.11+): ekler birbiriyle örtüştüğünden ("ın" = "ı"+"n" = "nın"'ın
+    # parçası...) geri izlemeli ``*`` kelime sonundaki ``(?!...)`` başarısız olunca her bölümlemeyi dener ve
+    # "bakan" + "ın"×20 + "x" gibi bir dizide üstel süre harcar; sahiplenici döngü tek geçişte sonuçlanır.
     return re.compile(
-        rf"(?<!{_WORD_CHARS})(?:{alts}){_APOS}(?:{_SUFFIXES})*(?!{_WORD_CHARS})",
+        rf"(?<!{_WORD_CHARS})(?:{alts}){_APOS}(?:{_SUFFIXES})*+(?!{_WORD_CHARS})",
         re.UNICODE,
     )
 

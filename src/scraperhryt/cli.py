@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import functools
 import logging
+import os
 import signal
 import sys
 import threading
@@ -57,6 +58,15 @@ PROBE_TIMEOUT_SECONDS = 5.0  # `check` komutunun servis başına zaman aşımı
 DEFAULT_IDLE_EXIT_SECONDS = 30.0  # run-all --once (RabbitMQ): kuyruklar bu kadar süre boş kalınca çık
 TOP_ALARMS = 5
 SCORER_PREFETCH = 1  # LLM yavaş olduğundan skorlayıcı aynı anda tek mesaj alır
+# Ortam değişkeni: 1/true ise `setup` ve `check` Ollama sorununu hata değil uyarı sayar (compose'da --ollama-optional
+# bayrağını geçmenin yolu; .env.example'a bakın).
+OLLAMA_OPTIONAL_ENV = "OLLAMA_OPTIONAL"
+# Ortam değişkeni: `setup` Ollama (sunucu + model) hazır olana dek en çok bu kadar saniye bekler; 0 = beklemez.
+# `docker compose --profile ollama up` ilk açılışta modeli indirirken `setup` servisinin hata vermemesi için
+# .env içinde OLLAMA_WAIT_SECONDS=900 gibi bir değer verin (bkz. .env.example).
+OLLAMA_WAIT_ENV = "OLLAMA_WAIT_SECONDS"
+OLLAMA_WAIT_POLL_SECONDS = 5.0  # `setup` Ollama'yı beklerken sondalar arası aralık
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "evet"})
 
 # (argparse alanı, Settings alanı): komut satırı seçenekleri ayarları bu eşlemeyle geçersiz kılar.
 _SETTING_OVERRIDES: tuple[tuple[str, str], ...] = (
@@ -74,6 +84,23 @@ Handler = Callable[[Message], None]
 # ---------------------------------------------------------------------------------------------------------
 # Küçük yardımcılar
 # ---------------------------------------------------------------------------------------------------------
+
+
+def env_flag(name: str) -> bool:
+    """Ortam değişkeni 1/true/yes/on/evet ise ``True`` (büyük/küçük harf duyarsız); yoksa ya da başka değerse ``False``."""
+    return os.environ.get(name, "").strip().lower() in _TRUE_VALUES
+
+
+def env_float(name: str, default: float) -> float:
+    """Ortam değişkenini sayıya çevirir; yoksa ya da sayı değilse (uyarı loglanır) ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r sayı değil; %s kullanılıyor", name, raw, default)
+        return default
 
 
 def build_settings(args: argparse.Namespace) -> Settings:
@@ -215,13 +242,19 @@ def probe_elasticsearch(settings: Settings, timeout: float = PROBE_TIMEOUT_SECON
     return ServiceStatus("Elasticsearch", True, detail, latency)
 
 
-def probe_ollama(settings: Settings, *, required: bool = True) -> ServiceStatus:
-    """Ollama sunucusunu (``/api/tags``) ve yapılandırılan modelin yüklü olup olmadığını denetler."""
+def probe_ollama(
+    settings: Settings, *, required: bool = True, timeout: float = PROBE_TIMEOUT_SECONDS
+) -> ServiceStatus:
+    """Ollama sunucusunu (``/api/tags``) ve yapılandırılan modelin yüklü olup olmadığını denetler.
+
+    Sonda istekleri ``ollama_timeout`` (dakikalar; LLM çağrıları için) yerine ``timeout`` ile sınırlanır: paketleri
+    düşüren (reddetmeyen) bir ana makinede ``check``/``setup``/servis başlangıcı dakikalarca askıda kalmasın.
+    """
     from .pipeline.llm import OllamaClient
 
     base = settings.ollama_base_url
     model = settings.ollama_model
-    client = OllamaClient(settings)
+    client = OllamaClient(settings.model_copy(update={"ollama_timeout": float(timeout)}))
     try:
         started = time.perf_counter()
         healthy = client.health()
@@ -240,6 +273,42 @@ def probe_ollama(settings: Settings, *, required: bool = True) -> ServiceStatus:
     return ServiceStatus("Ollama", True, f"model '{model}' yüklü ({base})", latency, required)
 
 
+def wait_for_ollama(
+    settings: Settings,
+    *,
+    required: bool = True,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
+    max_wait: float = 0.0,
+    poll: float = OLLAMA_WAIT_POLL_SECONDS,
+) -> ServiceStatus:
+    """``probe_ollama``'yı Ollama hazır olana ya da ``max_wait`` saniye dolana dek yineler (``setup`` için).
+
+    Sunucunun henüz ayağa kalkmadığı ya da modelin indirilmekte olduğu durumları (``docker compose --profile ollama``
+    ilk açılışı) kapsar; ``max_wait`` 0 ise tek sonda yapılır. Son sondanın durumu döner.
+    """
+    status = probe_ollama(settings, required=required, timeout=timeout)
+    if status.ok or max_wait <= 0:
+        return status
+    deadline = time.monotonic() + max_wait
+    log.warning("Ollama hazır değil: %s; en çok %.0f sn beklenecek (%s)", status.detail, max_wait, OLLAMA_WAIT_ENV)
+    waited = 0.0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            log.warning("Ollama %.0f sn içinde hazır olmadı: %s", max_wait, status.detail)
+            return ServiceStatus(
+                status.name, False, f"{status.detail} ({max_wait:.0f} sn beklendi)", status.latency_ms, required
+            )
+        pause = min(poll, remaining)
+        time.sleep(pause)
+        waited += pause
+        status = probe_ollama(settings, required=required, timeout=timeout)
+        if status.ok:
+            log.info("Ollama %.0f sn sonra hazır: %s", waited, status.detail)
+            return status
+        log.debug("Ollama hâlâ hazır değil (%.0f sn geçti): %s", waited, status.detail)
+
+
 # ---------------------------------------------------------------------------------------------------------
 # LLM / depo kurucuları
 # ---------------------------------------------------------------------------------------------------------
@@ -256,27 +325,30 @@ def warn_ollama(problem: str, settings: Settings) -> None:
 
 
 def build_llm(settings: Settings, *, fake: bool, fallback: bool) -> Any:
-    """``--fake-llm`` → HeuristicLLM; aksi halde OllamaClient. Ollama hazır değilse uyarır,
-    ``fallback=True`` (yalnızca run-all) ise HeuristicLLM'e geri düşer."""
+    """``--fake-llm`` → HeuristicLLM; aksi halde OllamaClient. Ollama hazır değilse uyarır ama istemciyi
+    korur: skorlayıcı ``LLMUnavailable``'da mesajı gecikmeli yeniden dener, Ollama ayağa kalkınca kendiliğinden
+    toparlanır. Yalnızca ``fallback=True`` (run-all ``--llm-fallback``) ise bu çalıştırma için HeuristicLLM'e
+    geri düşülür."""
     from .pipeline.llm import HeuristicLLM, OllamaClient
 
     if fake:
         log.info("Sezgisel LLM kullanılıyor (--fake-llm): skorlar anahtar kelime ve risk terimi sayımına dayanır")
         return HeuristicLLM(settings)
     client = OllamaClient(settings)
-    if not client.health():
-        problem = f"Ollama sunucusuna erişilemiyor ({settings.ollama_base_url})"
-    elif not client.model_available():
-        problem = f"'{settings.ollama_model}' modeli Ollama'da yüklü değil"
-    else:
+    # Hazırlık denetimi kısa sondayla yapılır (``ollama_timeout`` dakikalar sürebilir; askıda kalan bir ana makine
+    # servis başlangıcını geciktirmesin). Dönen istemci LLM çağrıları için tam zaman aşımını korur.
+    status = probe_ollama(settings, timeout=PROBE_TIMEOUT_SECONDS)
+    if status.ok:
         log.info("Ollama hazır: %s, model=%s", settings.ollama_base_url, settings.ollama_model)
         return client
-    warn_ollama(problem, settings)
+    warn_ollama(status.detail, settings)
     if not fallback:
+        log.warning("Ollama hazır olana dek LLM gerektiren mesajlar gecikmeli yeniden denenecek")
         return client
     client.close()
     log.warning(
-        "run-all: LLM yerine sezgisel değerlendirici (HeuristicLLM) kullanılacak; alarm skorları yaklaşık olacaktır"
+        "--llm-fallback: bu çalıştırma boyunca LLM yerine sezgisel değerlendirici (HeuristicLLM) kullanılacak; "
+        "alarm skorları yaklaşık olacaktır, Ollama sonradan ayağa kalksa da kullanılmaz"
     )
     return HeuristicLLM(settings)
 
@@ -361,6 +433,23 @@ class Supervisor:
     def ok(self) -> bool:
         return not self.failures
 
+    @property
+    def alive(self) -> list[str]:
+        """Hâlâ çalışan iş parçacıklarının adları (``join`` zaman aşımından sonra)."""
+        return [thread.name for thread in self.threads if thread.is_alive()]
+
+
+def shutdown_timeout_for(settings: Settings, llm: Any) -> float:
+    """Kapanışta iş parçacıklarına tanınan süre. Skorlayıcı bir Ollama çağrısının ortasında olabilir ve çağrı
+    süreç içi tüm denemeleriyle ``MAX_LLM_ATTEMPTS × ollama_timeout`` sürebilir; o bitmeden broker/LLM istemcisi
+    kapatılırsa mesaj ikinci kez skorlanıp yayınlanır. Sezgisel/sahte LLM'de kısa sabit süre yeter."""
+    from .pipeline.llm import OllamaClient
+    from .pipeline.scorer import MAX_LLM_ATTEMPTS
+
+    if isinstance(llm, OllamaClient):
+        return max(JOIN_TIMEOUT_SECONDS, MAX_LLM_ATTEMPTS * float(settings.ollama_timeout))
+    return JOIN_TIMEOUT_SECONDS
+
 
 class PipelineCounters:
     """run-all tüketicilerinin işlediği mesaj sayıları ve son etkinlik zamanı (boşta kalma tespiti için)."""
@@ -392,17 +481,8 @@ class PipelineCounters:
             return dict(self.processed)
 
 
-def consume_loop(
-    broker: Broker,
-    queue: str,
-    handler: Handler,
-    stop: threading.Event,
-    counters: PipelineCounters,
-    *,
-    prefetch: int | None = None,
-) -> None:
-    """``stop`` set edilene kadar kuyruğu tüketir. RabbitMQ'da ``consume`` zaten bloklar; bellek içi broker
-    kuyruk boşalınca döndüğünden kısa aralıklarla yeniden yoklanır."""
+def tracked_handler(queue: str, handler: Handler, counters: PipelineCounters) -> Handler:
+    """İşleyiciyi ``counters`` ile sarar: her mesaj için başlangıç/bitiş ve başarı sayımı (boşta kalma tespiti)."""
 
     def tracked(msg: Message) -> None:
         counters.begin()
@@ -413,10 +493,33 @@ def consume_loop(
         finally:
             counters.end(queue, success)
 
+    return tracked
+
+
+def consume_loop(
+    broker: Broker,
+    queue: str,
+    handler: Handler,
+    stop: threading.Event,
+    counters: PipelineCounters,
+    *,
+    prefetch: int | None = None,
+    on_idle: Callable[[], Any] | None = None,
+) -> None:
+    """``stop`` set edilene kadar kuyruğu tüketir. RabbitMQ'da ``consume`` zaten bloklar; bellek içi broker
+    kuyruk boşalınca döndüğünden kısa aralıklarla yeniden yoklanır ve her boş turda ``on_idle`` (varsa) çağrılır
+    (ör. süre eşiği dolan alarm özetini üretmek için). ``on_idle`` hatası loglanır, döngüyü durdurmaz."""
+    tracked = tracked_handler(queue, handler, counters)
     while not stop.is_set():
         processed = broker.consume(queue, tracked, prefetch=prefetch, stop_event=stop)
-        if processed == 0 and stop.wait(IDLE_POLL_SECONDS):
-            break
+        if processed == 0:
+            if on_idle is not None:
+                try:
+                    on_idle()
+                except Exception as exc:
+                    log.error("Boşta işlem başarısız (%s): %s", queue, describe_exc(exc))
+            if stop.wait(IDLE_POLL_SECONDS):
+                break
 
 
 def start_api_server(app: Any, settings: Settings, supervisor: Supervisor) -> Any:
@@ -583,12 +686,22 @@ def cmd_setup(args: argparse.Namespace, settings: Settings) -> int:
         failed = True
         rows.append(("Elasticsearch indeksleri", "HATA", f"{settings.elasticsearch_url}: {describe_exc(exc)}"))
 
-    ollama = probe_ollama(settings, required=False)
+    ollama = wait_for_ollama(
+        settings, required=not args.ollama_optional, timeout=args.timeout, max_wait=max(0.0, args.ollama_wait)
+    )
     rows.append(("Ollama", ollama.label, ollama.detail))
 
     print(render_table(("Bileşen", "Durum", "Ayrıntı"), rows))
     if not ollama.ok:
         warn_ollama(ollama.detail, settings)
+        if ollama.required:
+            failed = True
+            print(
+                "Ollama hazır değil: skorlayıcı anahtar kelime eşleşen haberleri değerlendiremez ve yeniden denemeler "
+                "tükenince bunlar ölü mektuba düşer. Ollama'yı konteynerlerden erişilebilir biçimde başlatın "
+                "(ana makinede: OLLAMA_HOST=0.0.0.0 ollama serve; ya da docker compose --profile ollama up -d). "
+                f"Ollama'sız kurulum (ör. --fake-llm) için: --ollama-optional ya da {OLLAMA_OPTIONAL_ENV}=1."
+            )
     if failed:
         print("Kurulum tamamlanamadı: yukarıdaki HATA satırlarını giderip `scraperhryt setup` komutunu yineleyin.")
         return 1
@@ -600,7 +713,7 @@ def cmd_check(args: argparse.Namespace, settings: Settings) -> int:
     statuses = [
         probe_rabbitmq(settings, timeout=args.timeout),
         probe_elasticsearch(settings, timeout=args.timeout),
-        probe_ollama(settings, required=not args.ollama_optional),
+        probe_ollama(settings, required=not args.ollama_optional, timeout=args.timeout),
     ]
     rows = [(status.name, status.label, fmt_latency(status.latency_ms), status.detail) for status in statuses]
     print(render_table(("Servis", "Durum", "Gecikme", "Ayrıntı"), rows))
@@ -741,6 +854,15 @@ def cmd_api(args: argparse.Namespace, settings: Settings) -> int:
         close_llm(llm)
         return 1
     broker = make_broker(settings)
+    try:
+        broker.declare_topology()  # idempotent; POST /reports/generate'in yayınladığı exchange kurulmuş olsun
+    except Exception as exc:
+        log.warning(
+            "RabbitMQ topolojisi oluşturulamadı (%s): %s. API yine başlıyor; `scraperhryt setup` çalıştırılana dek "
+            "POST /reports/generate raporu yazar ama kuyruğa yayınlayamayabilir",
+            redact_url(settings.rabbitmq_url),
+            describe_exc(exc),
+        )
     app = create_app(settings, store, llm, broker=broker)
     log.info("API başlıyor: http://%s:%d", settings.api_host, settings.api_port)
     try:
@@ -828,6 +950,15 @@ def run_all_once_in_memory(
     return 0
 
 
+def flush_pending_alarms(consumer: Any) -> None:
+    """Rapor tüketicisi durunca tampondaki (kuyruktan onaylanmış) alarmları özetler; hata loglanır."""
+    try:
+        if consumer.flush() is not None:
+            log.info("Çıkışta bekleyen alarmlar özetlendi")
+    except Exception as exc:
+        log.error("Çıkışta alarm özeti üretilemedi (%d alarm kaybedildi): %s", consumer.buffered, describe_exc(exc))
+
+
 def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
     from .alarm_sinks import build_sinks
     from .pipeline.alarm import AlarmService
@@ -844,7 +975,7 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
     if args.ask and not args.once:
         log.warning("--ask yalnızca --once ile çalışır; sürekli modda soru yok sayılıyor (POST /ask kullanın)")
 
-    llm = build_llm(settings, fake=args.fake_llm, fallback=True)
+    llm = build_llm(settings, fake=args.fake_llm, fallback=bool(args.llm_fallback))
     try:
         store = prepare_store(settings, in_memory=bool(args.in_memory))
     except Exception as exc:
@@ -852,22 +983,19 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
         close_llm(llm)
         return 1
 
-    # --in-memory (ya da RABBITMQ_URL=memory://) → tek bir InMemoryBroker herkes tarafından paylaşılır;
-    # RabbitMQ'da pika bağlantıları iş parçacığı güvenli olmadığından her tüketici kendi broker'ını kurar.
+    # --in-memory (ya da RABBITMQ_URL=memory://) → tek bir InMemoryBroker herkes tarafından paylaşılır.
+    # RabbitMQ'da pika bağlantıları iş parçacığı güvenli olmadığından her iş parçacığı kendi broker'ını kurar ve
+    # işi bitince KENDİSİ kapatır; ana iş parçacığı yalnızca kendi kurduğu broker'ları (``main_brokers``) kapatır.
     setup_broker = make_broker(settings, in_memory=bool(args.in_memory))
     shared_broker = setup_broker if isinstance(setup_broker, InMemoryBroker) else None
-    brokers: list[Broker] = [setup_broker]
+    main_brokers: list[Broker] = [setup_broker]
 
     def broker_for() -> Broker:
-        if shared_broker is not None:
-            return shared_broker
-        broker = make_broker(settings)
-        brokers.append(broker)
-        return broker
+        return shared_broker if shared_broker is not None else make_broker(settings)
 
-    def make_runner() -> ScrapeRunner:
+    def make_runner(broker: Broker) -> ScrapeRunner:
         seen = SeenStore(":memory:") if shared_broker is not None else SeenStore(settings.state_db_path)
-        return ScrapeRunner(settings, broker_for(), seen_store=seen, sources=build_sources(settings))
+        return ScrapeRunner(settings, broker, seen_store=seen, sources=build_sources(settings))
 
     log.info(
         "run-all başlıyor: broker=%s, depo=%s, tek tur=%s, LLM=%s, API=%s, kaynaklar=%s, anahtar kelimeler=%s, eşik=%d",
@@ -885,17 +1013,71 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
         setup_broker.close()
 
     builder = ReportBuilder(settings, store, llm)
-    filter_broker, scorer_broker, alarm_broker, consumer_broker = (broker_for() for _ in range(4))
+    filter_broker, scorer_broker, alarm_broker, consumer_broker, periodic_broker = (broker_for() for _ in range(5))
     filter_service = KeywordFilterService(settings, filter_broker)
-    scorer = ScoringService(settings, scorer_broker, llm)
+    # Tüketiciler ``.run()`` yerine ``consume_loop`` ile sürüldüğünden paylaşılan durdurma olayını kurucuda alırlar;
+    # aksi halde Ollama/ES kesintisinde ``wait_for_llm`` / ``_prepare_indices`` kendi (hiç set edilmeyen) olayını
+    # bekler ve SIGINT/SIGTERM kapanışı join zaman aşımına dek askıda kalırdı.
+    scorer = ScoringService(settings, scorer_broker, llm, stop_event=stop)
     alarm = AlarmService(settings, alarm_broker, store, build_sinks(settings), embedder=llm)
+    alarm._stop_event = stop  # AlarmService kurucusunda stop_event parametresi yok; run() ile aynı etkiyi verir
     consumer = ReportingConsumer(settings, consumer_broker, store, builder)
-    periodic = PeriodicReporter(settings, store, builder, broker_for())
+    periodic = PeriodicReporter(settings, store, builder, periodic_broker)
 
     exit_code = 0
     supervisor = Supervisor(stop)
     counters = PipelineCounters()
     api_server: Any = None
+
+    def consume_worker(broker: Broker, queue: str, handler: Handler, prefetch: int) -> None:
+        try:
+            consume_loop(broker, queue, handler, stop, counters, prefetch=prefetch)
+        finally:
+            broker.close()
+
+    def reporter_worker() -> None:
+        """q.alarms tüketicisi. RabbitMQ'da ``ReportingConsumer.run`` sürer: süre eşiği gözcüsü ve çıkışta tampon
+        boşaltma onun içindedir (işleyici sayaçlarla sarılır ki boşta kalma tespiti ve özet sayımı çalışsın).
+        Bellek içi broker kuyruk boşalınca döndüğünden ``consume_loop`` ile yoklanır; süre eşiği boş turlarda
+        denetlenir ve tampon çıkışta elle boşaltılır."""
+        queue = str(Queue.ALARMS)
+        try:
+            if shared_broker is None:
+                consumer.handle = tracked_handler(queue, consumer.handle, counters)
+                consumer.run(stop_event=stop)
+            else:
+                try:
+                    consume_loop(
+                        consumer_broker,
+                        queue,
+                        consumer.handle,
+                        stop,
+                        counters,
+                        prefetch=settings.rabbitmq_prefetch,
+                        on_idle=consumer.flush_if_due,
+                    )
+                finally:
+                    flush_pending_alarms(consumer)
+        finally:
+            consumer_broker.close()
+
+    def periodic_worker() -> None:
+        try:
+            periodic.run(stop_event=stop)
+        finally:
+            periodic_broker.close()
+
+    def scrape_forever() -> None:
+        broker = broker_for()
+        try:
+            runner = make_runner(broker)
+            try:
+                runner.run_forever(stop_event=stop)
+            finally:
+                runner.close()
+        finally:
+            broker.close()
+
     try:
         with signal_scope(stop):
             if args.once and shared_broker is not None:
@@ -904,7 +1086,7 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     broker=shared_broker,
                     store=store,
                     stop=stop,
-                    make_runner=make_runner,
+                    make_runner=functools.partial(make_runner, shared_broker),
                     stages=(
                         ("anahtar kelime filtresi", filter_service),
                         ("LLM skorlama", scorer),
@@ -921,21 +1103,24 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                 ("filter", filter_broker, str(Queue.ARTICLES_RAW), filter_service.handle, settings.rabbitmq_prefetch),
                 ("scorer", scorer_broker, str(Queue.ARTICLES_KEYWORD), scorer.handle, SCORER_PREFETCH),
                 ("alarm", alarm_broker, str(Queue.ARTICLES_SCORED), alarm.handle, settings.rabbitmq_prefetch),
-                ("reporter", consumer_broker, str(Queue.ALARMS), consumer.handle, settings.rabbitmq_prefetch),
             )
+            alarm._check_embedder()  # bağımsız `alarm` komutuyla aynı başlangıç denetimi (indeksler zaten hazır)
             for name, broker, queue, handler, prefetch in workers:
-                supervisor.spawn(
-                    name, functools.partial(consume_loop, broker, queue, handler, stop, counters, prefetch=prefetch)
-                )
-            supervisor.spawn("periodic", functools.partial(periodic.run, stop_event=stop))
+                supervisor.spawn(name, functools.partial(consume_worker, broker, queue, handler, prefetch))
+            supervisor.spawn("reporter", reporter_worker)
+            supervisor.spawn("periodic", periodic_worker)
             if serve_api:
                 from .reporting.api import create_app
 
-                app = create_app(settings, store, llm, broker=broker_for())
+                api_broker = broker_for()
+                main_brokers.append(api_broker)
+                app = create_app(settings, store, llm, broker=api_broker)
                 api_server = start_api_server(app, settings, supervisor)
 
             if args.once:
-                runner = make_runner()
+                runner_broker = broker_for()
+                main_brokers.append(runner_broker)
+                runner = make_runner(runner_broker)
                 try:
                     stats = runner.run_once()
                 finally:
@@ -953,6 +1138,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     if not any(thread.is_alive() for thread in supervisor.threads):
                         break
                     stop.wait(IDLE_POLL_SECONDS)
+                # Özet, rapor tüketicisinin çıkışta tamponu boşaltmasını (alarm özeti) da kapsasın.
+                supervisor.join(shutdown_timeout_for(settings, llm))
                 print_run_summary(
                     title="run-all özeti (tek tur)",
                     scrape_summary=stats.summary(),
@@ -965,24 +1152,27 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                 if args.ask and not print_ask_answer(settings, store, llm, args.ask):
                     exit_code = 1
             else:
-
-                def scrape_forever() -> None:
-                    runner = make_runner()
-                    try:
-                        runner.run_forever(stop_event=stop)
-                    finally:
-                        runner.close()
-
                 supervisor.spawn("scraper", scrape_forever)
                 supervisor.wait()
     finally:
         stop.set()
         if api_server is not None:
             api_server.should_exit = True
-        supervisor.join()
-        for broker in brokers:
+        timeout = shutdown_timeout_for(settings, llm)
+        log.info("İş parçacıkları bekleniyor (en çok %.0fs; süren bir LLM çağrısı varsa bitmesi beklenir)", timeout)
+        supervisor.join(timeout)
+        for broker in main_brokers:
             broker.close()
-        close_llm(llm)
+        still_running = supervisor.alive
+        if still_running:
+            # Tüketici iş parçacıkları kendi broker'larını kapatır; LLM istemcisi onlar kullanırken kapatılmaz
+            # (süreç çıkışında bırakılır), aksi halde süren çağrı hata verir ve mesaj yeniden skorlanırdı.
+            log.warning(
+                "Hâlâ çalışan iş parçacıkları var (%s); LLM istemcisi süreç çıkışına bırakıldı",
+                ", ".join(still_running),
+            )
+        else:
+            close_llm(llm)
         if not supervisor.ok:
             exit_code = 1
             log.error("run-all hatayla sonlandı; çöken iş parçacıkları: %s", ", ".join(supervisor.failures))
@@ -1001,6 +1191,18 @@ def _add_fake_llm(parser: argparse.ArgumentParser) -> None:
         "--fake-llm",
         action="store_true",
         help="Ollama yerine deterministik sezgisel değerlendirici kullan (geliştirme/test)",
+    )
+
+
+def _add_ollama_optional(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ollama-optional",
+        action="store_true",
+        default=env_flag(OLLAMA_OPTIONAL_ENV),
+        help=(
+            "Ollama erişilemez ya da model yüklü değilse hata yerine uyarı ver (çıkış kodunu etkilemez; --fake-llm "
+            f"kullanımı için). Ortam değişkeni {OLLAMA_OPTIONAL_ENV}=1 de aynı etkiyi yapar (docker compose için)"
+        ),
     )
 
 
@@ -1028,16 +1230,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", metavar="KOMUT", required=True)
 
-    p = sub.add_parser("setup", help="RabbitMQ topolojisi + Elasticsearch indeksleri + Ollama model denetimi")
+    p = sub.add_parser(
+        "setup",
+        help="RabbitMQ topolojisi + Elasticsearch indeksleri + Ollama model denetimi (Ollama hazır değilse hata; "
+        "--ollama-optional ile uyarı)",
+    )
+    p.add_argument(
+        "--timeout", type=float, default=PROBE_TIMEOUT_SECONDS, help="Ollama sondası zaman aşımı (saniye)"
+    )
+    p.add_argument(
+        "--ollama-wait",
+        type=float,
+        default=env_float(OLLAMA_WAIT_ENV, 0.0),
+        metavar="SN",
+        help=(
+            "Ollama (sunucu + model) hazır olana dek en çok bu kadar saniye bekle; 0 = bekleme. Ortam değişkeni "
+            f"{OLLAMA_WAIT_ENV} de aynı etkiyi yapar (docker compose --profile ollama ilk açılışında model "
+            "indirilirken kurulumun hata vermemesi için)"
+        ),
+    )
+    _add_ollama_optional(p)
     p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("check", help="RabbitMQ / Elasticsearch / Ollama erişilebilirlik raporu (gecikmelerle)")
     p.add_argument("--timeout", type=float, default=PROBE_TIMEOUT_SECONDS, help="servis başına zaman aşımı (saniye)")
-    p.add_argument(
-        "--ollama-optional",
-        action="store_true",
-        help="Ollama erişilemezse hata yerine uyarı ver (çıkış kodunu etkilemez; --fake-llm kullanımı için)",
-    )
+    _add_ollama_optional(p)
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("scrape", help="haber kazıyıcı (article.raw yayınlar)")
@@ -1088,6 +1305,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="RabbitMQ/Elasticsearch yerine bellek içi broker ve depo kullan (geliştirme)",
     )
     _add_fake_llm(p)
+    p.add_argument(
+        "--llm-fallback",
+        action="store_true",
+        help="Ollama başlangıçta hazır değilse (sunucu kapalı / model yüklü değil) bu çalıştırma boyunca sezgisel "
+        "değerlendiriciye geri düş. Varsayılan: Ollama istemcisi korunur, LLM gerektiren mesajlar Ollama hazır olana "
+        "dek gecikmeli yeniden denenir",
+    )
     p.add_argument("--no-api", action="store_true", help="API sunucusunu başlatma")
     p.add_argument("--backfill-days", type=int, default=None, metavar="N", help="12punto arşivinden N gün geriye tara")
     p.add_argument(

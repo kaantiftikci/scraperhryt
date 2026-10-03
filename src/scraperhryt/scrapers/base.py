@@ -57,11 +57,21 @@ def first_nonempty(*values: str | None) -> str:
     return ""
 
 
-_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?:…»”\"'’])(?=[A-ZÇĞİÖŞÜ0-9“\"«(])")
+# Yalnızca gerçek cümle sonlarında böler: küçük harf/rakam + sonlandırıcı (``.!?…``), isteğe bağlı kapanış
+# tırnağı, ardından boşluksuz büyük harfle başlayan küçük harfli bir sözcük ("tamamlandı.Zanlılar").
+# Ondalık sayılar ("1.5"), saatler ("22:30"), noktalı tarihler ("02.10.2026") ve kesme işaretli büyük harfli
+# başlıklar ("ERDOĞAN'DAN") bu kalıba uymadığından bölünmez.
+_SENTENCE_BOUNDARY_RE = re.compile(
+    r"(?:(?<=[a-zçğıöşü0-9][.!?…])|(?<=[.!?…][”»\"’]))(?=[“«\"(]?[A-ZÇĞİÖŞÜ][a-zçğıöşü])"
+)
 
 
 def paragraphize_flat_text(text: str | None) -> str:
-    """Paragraf sınırları kaybolmuş düz metni (JSON-LD articleBody gibi) cümle sonlarından böler."""
+    """Paragraf sınırları kaybolmuş düz metni (JSON-LD articleBody gibi) cümle sonlarından böler.
+
+    Sayılar, saatler, tarihler ve kesme işaretli sözcükler korunur; yalnızca boşluksuz birleşmiş cümle
+    sonları ("bitti.İkinci") satır sonuna çevrilir.
+    """
     cleaned = clean_text(text)
     if not cleaned:
         return ""

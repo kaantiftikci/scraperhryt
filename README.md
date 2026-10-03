@@ -13,6 +13,7 @@ alarma gitmeyen kayıtlarda bu alanlar **boş kalır** ama nesne yine de hem Rab
 - Mimari ayrıntıları ve raporlama/RAG tasarımı: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - İşletme el kitabı (başlat/durdur, sağlık, ölü mektup, model değiştirme): [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
 - Mühendislik sözleşmesi (modül sınırları): [`docs/BUILD_SPEC.md`](docs/BUILD_SPEC.md)
+- Gereksinim izleme matrisi (istek → kod yolu → kanıtlayan test): [`docs/REQUIREMENTS_TRACE.md`](docs/REQUIREMENTS_TRACE.md)
 
 ---
 
@@ -148,7 +149,7 @@ bir bütçe verin; bütçe kaynaklar arasında eşit paylaşılır (20 Hürriyet
 | Komut | Açıklama |
 |-------|----------|
 | `scraperhryt [--log-level SEVIYE] [--version] <komut>` | Genel seçenekler: `--log-level` `LOG_LEVEL`'i geçersiz kılar (DEBUG/INFO/WARNING/ERROR), `--version` sürümü yazdırır. |
-| `scraperhryt setup` | Veri dizinlerini, RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur, Ollama'da `OLLAMA_MODEL`'in yüklü olduğunu denetler (Ollama sorunu uyarıdır, çıkış kodu 0). Tekrar çalıştırmak güvenlidir; compose yığınında `setup` servisi olarak otomatik çalışır. |
+| `scraperhryt setup [--ollama-optional] [--ollama-wait SN] [--timeout SN]` | Veri dizinlerini, RabbitMQ topolojisini (`news.topic`, `news.dlx`, ana/retry/ölü mektup kuyrukları) ve Elasticsearch indekslerini oluşturur, Ollama'da `OLLAMA_MODEL`'in yüklü olduğunu denetler. Ollama erişilemez ya da model yüklü değilse **HATA verip çıkış kodu 1 ile biter** (compose yığınında uygulama servisleri başlamaz); `--ollama-optional` ya da `OLLAMA_OPTIONAL=1` ile Ollama sorunu yalnızca uyarıdır ve çıkış kodu 0 olur (`--fake-llm` kullanımı için). `--ollama-wait SN` (`OLLAMA_WAIT_SECONDS`) Ollama + model hazır olana dek en çok SN saniye bekler (varsayılan 0); `--timeout` Ollama sondası zaman aşımı (varsayılan 5 s). Tekrar çalıştırmak güvenlidir; compose yığınında `setup` servisi olarak otomatik çalışır. |
 | `scraperhryt check [--timeout SN] [--ollama-optional]` | RabbitMQ, Elasticsearch ve Ollama erişilebilirliğini (gecikmelerle) ve `OLLAMA_MODEL`'in yüklü olup olmadığını denetler. `--timeout` servis başına zaman aşımı (varsayılan 5 s); `--ollama-optional` ile Ollama sorunu çıkış kodunu bozmaz. |
 | `scraperhryt scrape [--once] [--source X] [--backfill-days N] [--interval SN]` | Kazıyıcı. `--once` tek tur; `--source hurriyet` veya `--source 12punto` tek kaynak; `--backfill-days N` 12punto arşivini N gün geriye tarar; `--interval` turlar arası bekleme (`SCRAPE_INTERVAL_SECONDS`). |
 | `scraperhryt filter` | `q.articles.raw` tüketicisi: anahtar kelime filtresi. |
@@ -157,7 +158,7 @@ bir bütçe verin; bütçe kaynaklar arasında eşit paylaşılır (20 Hürriyet
 | `scraperhryt report [--once] [--fake-llm]` | `q.alarms` tüketicisi (alarm özetleri) + periyodik rapor üretici. `--once` tek periyodik rapor üretir, yazdırır ve çıkar. |
 | `scraperhryt api [--host ADRES] [--port PORT] [--fake-llm]` | HTTP API ve pano (varsayılan `API_HOST:API_PORT`). |
 | `scraperhryt ask "soru" [--since-days N] [--top-k N] [--json] [--fake-llm]` | RAG soru-cevap: son haberlerden kaynak atıflı Türkçe yanıt üretir. `--since-days` yalnızca son N gün (`RAG_RECENCY_DAYS`); `--top-k` bağlama alınacak haber sayısı (`RAG_TOP_K`); `--json` `Answer` nesnesini JSON yazdırır. |
-| `scraperhryt run-all [--once] [--in-memory] [--fake-llm] [--no-api] [--backfill-days N] [--idle-timeout SN] [--ask "soru"]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). `--once`: kazıyıcı tek tur çalışır, kuyruklar boşalınca özet yazdırıp çıkar (API başlatılmaz); RabbitMQ modunda kuyruklar `--idle-timeout` saniye (varsayılan 30) boş kalınca çıkar. `--no-api` sürekli modda API'yi başlatmaz. `--ask "soru"`: `--once` ile boru hattı bitince aynı süreçteki depo üzerinde RAG sorusunu yanıtlayıp yazdırır (bellek içi depoda tek yol; `--fake-llm` ile yanıt haberlerden derlenen özetleyici geri dönüştür). SIGINT/SIGTERM ile düzgün kapanır. |
+| `scraperhryt run-all [--once] [--in-memory] [--fake-llm] [--llm-fallback] [--no-api] [--backfill-days N] [--idle-timeout SN] [--ask "soru"]` | Tüm katmanlar tek süreçte (her tüketici iş parçacığı kendi broker bağlantısını kullanır). `--once`: kazıyıcı tek tur çalışır, kuyruklar boşalınca özet yazdırıp çıkar (API başlatılmaz); RabbitMQ modunda kuyruklar `--idle-timeout` saniye (varsayılan 30) boş kalınca çıkar. `--no-api` sürekli modda API'yi başlatmaz. `--ask "soru"`: `--once` ile boru hattı bitince aynı süreçteki depo üzerinde RAG sorusunu yanıtlayıp yazdırır (bellek içi depoda tek yol; `--fake-llm` ile yanıt haberlerden derlenen özetleyici geri dönüştür). `--llm-fallback`: Ollama başlangıçta erişilemez ya da model yüklü değilse bu çalıştırma **boyunca** Ollama yerine sezgisel değerlendirici (`HeuristicLLM`) kullanılır; skorlar yaklaşık olur ve Ollama sonradan ayağa kalksa da kullanılmaz. Varsayılan (bayrak yok): Ollama istemcisi korunur, LLM gerektiren mesajlar Ollama hazır olana dek gecikmeli yeniden denenir. Başlangıçta Elasticsearch erişilemezse (`--in-memory` değilse) komut beklemeden çıkış kodu 1 ile biter. SIGINT/SIGTERM ile düzgün kapanır. |
 
 ---
 
@@ -231,7 +232,7 @@ Tümü `.env` dosyasından ya da ortamdan okunur (önek yok, büyük/küçük ha
 | `HURRIYET_GUNDEM_RSS` | `https://www.hurriyet.com.tr/rss/gundem` | Hürriyet Gündem RSS adresi. |
 | `HURRIYET_GUNDEM_LISTING` | `https://www.hurriyet.com.tr/gundem/` | Hürriyet Gündem liste sayfası. |
 | `PUNTO_BASE_URL` | `https://12punto.com.tr` | 12punto gerçek alan adı. |
-| `PUNTO_CATEGORIES` | `gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,yerel-haberler,kultur-sanat,saglik,egitim,cevre` | Taranan 12punto kategorileri (RSS + liste). |
+| `PUNTO_CATEGORIES` | `gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,otomotiv,seyahat,gurme,trend-bilgi-kapsulu` | Taranan 12punto kategorileri (RSS + liste). |
 
 ### Alarm kanalları
 

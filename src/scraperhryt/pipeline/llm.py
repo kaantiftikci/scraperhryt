@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -169,6 +170,28 @@ def normalize_model_name(name: str) -> str:
     return name if ":" in name else f"{name}:latest"
 
 
+def redact_url(url: str) -> str:
+    """URL'deki kimlik bilgisini gizler: ``http://u:gizli@host:11434`` → ``http://u:***@host:11434``.
+
+    Günlük satırları, ``LLMUnavailable`` metinleri ve bunlardan türeyen alarm gerekçeleri için; ters vekil
+    arkasındaki Ollama'ya temel kimlik doğrulamayla bağlanılırken parola ES'e/webhook'a sızmamalıdır.
+    """
+    try:
+        parts = urlsplit(url or "")
+        if not parts.username and not parts.password:
+            return url
+        host = parts.hostname or ""
+        if ":" in host:  # IPv6
+            host = f"[{host}]"
+        if parts.port:
+            host += f":{parts.port}"
+        if parts.username:
+            host = f"{parts.username}:***@{host}"
+        return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return "<url>"
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Ollama istemcisi
 # ---------------------------------------------------------------------------------------------------------
@@ -182,6 +205,8 @@ class OllamaClient:
         self._model = settings.ollama_model
         self._embedding_model = settings.ollama_embedding_model or settings.ollama_model
         self._base_url = settings.ollama_base_url.rstrip("/")
+        self._display_url = redact_url(self._base_url)  # hata/günlük metinlerinde yalnızca bu kullanılır
+        self._legacy_embed = False  # sunucuda /api/embed yoksa (eski sürüm) bir kez tespit edilip hatırlanır
         self._client = httpx.Client(
             base_url=self._base_url,
             timeout=settings.ollama_timeout,
@@ -197,6 +222,11 @@ class OllamaClient:
     @property
     def embedding_model_name(self) -> str:
         return self._embedding_model
+
+    @property
+    def display_url(self) -> str:
+        """Kimlik bilgisi gizlenmiş temel URL (günlük ve hata mesajları için)."""
+        return self._display_url
 
     def close(self) -> None:
         self._client.close()
@@ -215,9 +245,16 @@ class OllamaClient:
         try:
             return self._client.request(method, path, json=json_body, timeout=request_timeout)
         except httpx.TimeoutException as exc:
-            raise LLMUnavailable(f"Ollama zaman aşımı ({method} {path}): {exc}") from exc
+            raise LLMUnavailable(f"Ollama zaman aşımı ({method} {path}): {self._describe(exc)}") from exc
         except httpx.TransportError as exc:
-            raise LLMUnavailable(f"Ollama'ya bağlanılamadı ({self._base_url}{path}): {exc}") from exc
+            raise LLMUnavailable(f"Ollama'ya bağlanılamadı ({self._display_url}{path}): {self._describe(exc)}") from exc
+
+    def _describe(self, exc: BaseException) -> str:
+        """İstisna metni; httpx ham URL'yi içeriyorsa kimlik bilgisi gizlenmiş hâliyle değiştirilir."""
+        text = str(exc)
+        if self._display_url != self._base_url and self._base_url in text:
+            text = text.replace(self._base_url, self._display_url)
+        return text
 
     def _parse(self, resp: httpx.Response, path: str) -> dict[str, Any]:
         body_excerpt = excerpt(resp.text, 300)
@@ -305,9 +342,14 @@ class OllamaClient:
         return result
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if self._legacy_embed:
+            return [self._embed_legacy(text) for text in texts]
         resp = self._request("POST", "/api/embed", json_body={"model": self._embedding_model, "input": texts})
-        if resp.status_code == 404:
+        # Ollama eksik model için de 404 döner ama gövdesi {"error": "model ... not found"} olur; yalnızca uç
+        # noktanın kendisi yoksa (düz "404 page not found", <0.3.4) eski /api/embeddings'e düşülür.
+        if resp.status_code == 404 and not _json_error_body(resp):
             log.info("Ollama /api/embed bulunamadı (eski sürüm); /api/embeddings uç noktasına düşülüyor")
+            self._legacy_embed = True
             return [self._embed_legacy(text) for text in texts]
         data = self._parse(resp, "/api/embed")
         return _coerce_vectors(data.get("embeddings"), "/api/embed")
@@ -345,6 +387,15 @@ class OllamaClient:
             return False
         return True
 
+
+
+def _json_error_body(resp: httpx.Response) -> bool:
+    """Yanıt gövdesi Ollama'nın ``{"error": "..."}`` biçiminde bir hata nesnesi mi?"""
+    try:
+        data = resp.json()
+    except ValueError:
+        return False
+    return isinstance(data, dict) and bool(data.get("error"))
 
 def _coerce_vectors(raw: Any, path: str) -> list[list[float]]:
     if not isinstance(raw, list):
@@ -495,6 +546,11 @@ class RiskTerm:
     term: str  # KeywordMatcher deseni (kök + Türkçe ekler, '=' tam, 're:' regex)
     weight: int
     topic: str
+    label: str = ""  # gerekçe metninde gösterilecek ad (regex desenleri için); boşsa term'den türetilir
+
+    @property
+    def display(self) -> str:
+        return self.label or _display_term(self.term)
 
 
 RISK_TERMS: tuple[RiskTerm, ...] = (
@@ -524,7 +580,7 @@ RISK_TERMS: tuple[RiskTerm, ...] = (
     RiskTerm("yatırım fonu", 8, "finans/fon"),
     # siyaset / yönetim
     RiskTerm("kararname", 12, "siyaset"),
-    RiskTerm("re:resm[iî] gazete", 10, "siyaset"),
+    RiskTerm("re:resm[iî] gazete", 10, "siyaset", label="resmi gazete"),
     RiskTerm("kabine", 8, "siyaset"),
     RiskTerm("istifa", 10, "siyaset"),
     RiskTerm("görevden al", 10, "siyaset"),
@@ -532,7 +588,8 @@ RISK_TERMS: tuple[RiskTerm, ...] = (
     RiskTerm("kanun teklifi", 8, "siyaset"),
     RiskTerm("yasa", 5, "siyaset"),
     RiskTerm("seçim", 6, "siyaset"),
-    RiskTerm("atama", 6, "siyaset"),
+    # Ek zinciri fiil olumsuzlarını da ("atamam", "atamaz", "atamadı") kabul ederdi; ad çekimleri kalır.
+    RiskTerm(r"re:\batama(?!m\b|m[ıi]ş|mak|maz|z|d[ıi]|l[ıi]|yan|y[ıi]p|yacak|yor)\w*", 6, "siyaset", label="atama"),
     RiskTerm("genel başkan", 5, "siyaset"),
     # güvenlik
     RiskTerm("operasyon", 8, "güvenlik"),
@@ -548,7 +605,8 @@ RISK_TERMS: tuple[RiskTerm, ...] = (
     RiskTerm("zirve", 5, "dış politika"),
     RiskTerm("yaptırım", 8, "dış politika"),
     # ekonomi
-    RiskTerm("zam", 6, "ekonomi"),
+    # "zam" ek zinciriyle çok sık geçen "zaman/zamanla/zamanında"yı da yakalardı; (?!an) ile dışlanır.
+    RiskTerm(r"re:\bzam(?!an)\w*", 6, "ekonomi", label="zam"),
     RiskTerm("enflasyon", 6, "ekonomi"),
     RiskTerm("bütçe", 6, "ekonomi"),
     RiskTerm("vergi", 6, "ekonomi"),
@@ -711,7 +769,7 @@ class HeuristicLLM:
         topics = [t for t, _ in ranked[:3]] or ["diğer"]
 
         kw_text = ", ".join(f"{h.keyword} ({h.count} kez)" for h in kw_hits) or "yok"
-        risk_text = ", ".join(_display_term(h.keyword) for h in risk_hits) or "yok"
+        risk_text = ", ".join(self._risk_index[h.keyword].display for h in risk_hits) or "yok"
         neg_text = ", ".join(_display_term(h.keyword) for h in neg_hits) or "yok"
         reason = (
             f"Sezgisel değerlendirme (LLM bağlı değil): anahtar kelimeler: {kw_text}; "

@@ -5,13 +5,15 @@ Adımlar (``QAEngine.ask``):
 
 1. **Sorgu yeniden yazma** — ``llm.chat_json`` → ``{"search_terms": [...], "entities": [...]}``; LLM hatasında
    sorunun kendi sözcükleri (Türkçe küçük harf, durak sözcükler atılmış) kullanılır.
-2. **Hibrit geri getirme** — ``store.search_records`` (BM25 + yenilik) tam sorgu ve (varsa) yalnızca varlık adları
-   ile; ``OLLAMA_EMBEDDING_MODEL`` ayarlıysa ``llm.embed`` → ``store.knn_search``. Sıralamalar Reciprocal Rank
-   Fusion (k=60) ile birleştirilir; kNN isteğe bağlıdır ve hatası sözlüksel aramayı engellemez.
+2. **Hibrit geri getirme** — ``store.search_records`` (BM25 + yenilik) birkaç dar sorguyla (en önemli terimler,
+   her varlık adı tek başına, sorunun kendi sözcükleri; bkz. ``QAEngine.search_queries``); ``OLLAMA_EMBEDDING_MODEL``
+   ayarlıysa ``llm.embed`` → ``store.knn_search``. Sıralamalar Reciprocal Rank Fusion (k=60) ile birleştirilir;
+   kNN isteğe bağlıdır ve hatası sözlüksel aramayı engellemez.
 3. **Bağlam** — belgeler en yeniden en eskiye sıralanıp ``[n] (kaynak, tarih) Başlık — alt başlık — içerik``
    bloklarına çevrilir; toplam bağlam ``OLLAMA_NUM_CTX``'e göre sınırlanır.
 4. **Yanıt** — ``llm.generate_text`` ile atıflı Türkçe yanıt; LLM erişilemezse en yeni başlıklardan deterministik
-   çıkarımsal yanıt (``model="fallback"``). Hiç haber bulunamazsa ``INSUFFICIENT_EVIDENCE_TEXT`` döner.
+   çıkarımsal yanıt (``model="fallback"``). Hiç haber bulunamazsa LLM çağrılmadan ``INSUFFICIENT_EVIDENCE_TEXT``
+   döner (``model="none"``; bu bir LLM arızası değildir).
 """
 
 from __future__ import annotations
@@ -47,10 +49,18 @@ log = logging.getLogger(__name__)
 RRF_K = 60
 #: LLM'siz yedek yanıtta listelenen en yeni haber sayısı.
 FALLBACK_HEADLINES = 3
-#: ``Answer.model`` değeri: yanıt LLM yerine haberlerden deterministik olarak derlendi.
+#: ``Answer.model`` değeri: LLM erişilemediği için yanıt haberlerden deterministik olarak derlendi.
 FALLBACK_MODEL = "fallback"
-#: Yeniden yazılmış arama terimi üst sınırı (çok uzun sorgular ES'te eşleşmeyi zorlaştırır).
+#: ``Answer.model`` değeri: eşleşen haber bulunamadığından LLM hiç çağrılmadı (LLM arızası değildir).
+NO_EVIDENCE_MODEL = "none"
+#: ``Answer.search_terms``'e alınan yeniden yazılmış terim + varlık adı üst sınırı.
 MAX_SEARCH_TERMS = 12
+#: Birleşik sözlüksel sorguya alınan arama terimi sayısı. ES ``best_fields`` sorgusunda ``minimum_should_match``
+#: alan başına uygulanır: uzun bir sorguda haberin tek bir alanda terimlerin %60'ını içermesi gerekir ve ilgili
+#: haberler elenir; kısa sorgular bu eşiği kolay aşar.
+COMBINED_QUERY_TERMS = 4
+#: Tek başına sorgulanan varlık adı (yoksa terim) üst sınırı; her biri ayrı bir depo isteğidir.
+MAX_NARROW_QUERIES = 4
 #: Bağlam bloğu başına içerik alt sınırı (toplam bütçe çok sıkışırsa bile bu kadar verilir).
 MIN_CONTENT_CHARS = 300
 #: ``OLLAMA_NUM_CTX`` token → karakter yaklaşık çarpanı (Türkçe metinde ~3-4 karakter/token; istem payı düşülmüş).
@@ -185,7 +195,7 @@ class QAEngine:
 
         if not citations:
             scope = f" (Son {days} günde taranan haberler arasında eşleşme bulunamadı.)" if days > 0 else ""
-            answer_text, model = INSUFFICIENT_EVIDENCE_TEXT + scope, FALLBACK_MODEL
+            answer_text, model = INSUFFICIENT_EVIDENCE_TEXT + scope, NO_EVIDENCE_MODEL
         else:
             answer_text, model = self.generate_answer(question, blocks, ordered, citations, since_days=days)
 
@@ -220,17 +230,23 @@ class QAEngine:
 
     @staticmethod
     def search_queries(question: str, terms: Sequence[str], entities: Sequence[str]) -> list[str]:
-        """Sözlüksel arama sorguları: tam sorgu (terimler + varlıklar) ve, ayrıca varlık varsa, yalnızca varlıklar.
+        """Sözlüksel arama sorguları; her biri ayrı ``search_records`` çağrısıdır, sonuçlar RRF ile birleştirilir.
 
-        İkinci sorgu, çok terimli sorgularda ES'in ``minimum_should_match`` eşiğine takılan ama kişi/kurum adını
-        içeren haberlerin kaybolmamasını sağlar (RRF ile birleştirilir).
+        1. en önemli ``COMBINED_QUERY_TERMS`` arama terimi tek sorguda,
+        2. her varlık adı (varlık yoksa her terim) tek başına, en fazla ``MAX_NARROW_QUERIES``,
+        3. sorunun kendi sözcükleri (durak sözcükler atılmış; yeniden yazma önemli bir sözcüğü düşürdüyse emniyet).
+
+        Tüm terimleri tek sorguda birleştirmek ES'te ters teper: ``best_fields`` + ``minimum_should_match`` alan
+        başına uygulandığından 12 terimlik sorguda haberin tek bir alanda 7+ terim içermesi gerekir ve kişi adını
+        taşıyan ilgili haberler elenir. Dar sorgular eşiği kolay aşar; birden çok sorguda görünen haber RRF'te öne
+        çıkar. Tekrar eden ve boş sorgular atılır.
         """
-        combined = _dedupe(list(terms) + list(entities))[:MAX_SEARCH_TERMS]
-        queries = [" ".join(combined) or flat_text(question)]
-        entity_query = " ".join(_dedupe(list(entities)))
-        if entity_query and entity_query != queries[0]:
-            queries.append(entity_query)
-        return queries
+        term_list = _dedupe(list(terms))
+        narrow = _dedupe(list(entities)) or term_list
+        candidates = [" ".join(term_list[:COMBINED_QUERY_TERMS])]
+        candidates.extend(narrow[:MAX_NARROW_QUERIES])
+        candidates.append(" ".join(question_tokens(question)) or flat_text(question))
+        return _dedupe(candidates)
 
     # --- 2. geri getirme ---
     def retrieve(

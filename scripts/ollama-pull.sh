@@ -32,8 +32,14 @@ done
 
 for model in "$OLLAMA_MODEL" $OLLAMA_EMBEDDING_MODEL; do
   [ -n "$model" ] || continue
-  if ollama list | awk 'NR > 1 { print $1 }' | grep -qx -- "$model"; then
-    echo "ollama-pull: $model zaten yüklü"
+  # `ollama list` adları her zaman etiketli yazar (nomic-embed-text → nomic-embed-text:latest); etiketsiz adı
+  # aynı kurala göre tamamla ki yüklü model yeniden indirilmesin (pipeline/llm.py normalize_model_name ile aynı).
+  case "$model" in
+    *:*) installed_name="$model" ;;
+    *) installed_name="$model:latest" ;;
+  esac
+  if ollama list | awk 'NR > 1 { print $1 }' | grep -qx -- "$installed_name"; then
+    echo "ollama-pull: $model zaten yüklü ($installed_name)"
     continue
   fi
   echo "ollama-pull: indiriliyor: $model"

@@ -3,11 +3,25 @@
 #   cp .env.example .env            # ayarları düzenleyin (anahtar kelimeler, eşik, Ollama adresi ...)
 #   docker compose up -d --build    # rabbitmq + elasticsearch + setup + scraper/filter/scorer/alarm/reporter/api
 #   docker compose --profile kibana up -d kibana          # isteğe bağlı Kibana (http://localhost:5601)
-#   docker compose --profile ollama up -d                 # Ollama'yı da konteynerde çalıştır (+ model indirme)
+#   make up-ollama                                        # Ollama'yı da konteynerde çalıştır: önce model indirilir,
+#                                                         # sonra yığın başlar (bkz. aşağıdaki not)
 #
 # Ollama varsayılan olarak ANA MAKİNEDE çalışır (OLLAMA_BASE_URL=http://host.docker.internal:11434, .env dosyasına bakın);
-# uygulama konteynerleri host-gateway üzerinden ona ulaşır. `--profile ollama` ile konteynerde çalıştırıyorsanız
-# .env içinde OLLAMA_BASE_URL=http://ollama:11434 yapın.
+# uygulama konteynerleri host-gateway üzerinden ona ulaşır. Ollama varsayılan olarak yalnızca 127.0.0.1'i dinler ve
+# bu adres konteynerlerden ERİŞİLEMEZ: ana makinede `OLLAMA_HOST=0.0.0.0 ollama serve` ile başlatın.
+# `--profile ollama` ile konteynerde çalıştırıyorsanız .env içinde OLLAMA_BASE_URL=http://ollama:11434 yapın.
+# `setup` servisi Ollama'ya erişemezse (ya da model yüklü değilse) HATA ile çıkar ve uygulama servisleri başlamaz;
+# Ollama'sız kurulum için .env içinde OLLAMA_OPTIONAL=1.
+# `--profile ollama` ile İLK açılışta `ollama-pull` modeli (qwen2.5:7b ≈ 4.7 GB) dakikalarca indirir; `setup` ona
+# bağlı değildir (profil dışı bir servis profilli servise bağlanamaz) ve model yokken HATA verirdi. İki çözüm:
+#   * `make up-ollama`: önce `docker compose --profile ollama run --rm ollama-pull` (indirme bitene dek bloklar),
+#     sonra `docker compose --profile ollama up -d`.
+#   * .env içinde OLLAMA_WAIT_SECONDS=900: `setup` Ollama sunucusu + model hazır olana dek bu kadar saniye bekler.
+#
+# Kapanış: skorlayıcı bir Ollama çağrısının ortasında olabilir (OLLAMA_TIMEOUT=180 s, süreç içi 3 deneme); raporlayıcı
+# ve API de anlatı/RAG için LLM çağırır. Bu servislere `stop_grace_period` (LLM_STOP_GRACE, varsayılan 200s) verilir:
+# `docker compose stop|down|restart` SIGTERM sonrası SIGKILL'den önce süren çağrının bitip mesajın onaylanmasını
+# bekler; `-t` vermek gerekmez. Diğer servisler varsayılan 10 s ile durur.
 #
 # scripts/wait-for.sh: compose dışında (systemd, çıplak sunucu) servisleri beklemek için; compose içinde
 # depends_on + healthcheck zaten başlatma sırasını güvence altına alır.
@@ -163,6 +177,7 @@ services:
   scorer:
     <<: *app
     command: ["scraperhryt", "score"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
     depends_on: *app-depends
 
   alarm:
@@ -173,11 +188,13 @@ services:
   reporter:
     <<: *app
     command: ["scraperhryt", "report"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
     depends_on: *app-depends
 
   api:
     <<: *app
     command: ["scraperhryt", "api", "--host", "0.0.0.0", "--port", "8000"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on: *app-depends

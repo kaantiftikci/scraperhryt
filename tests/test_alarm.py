@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,9 +20,10 @@ from scraperhryt.alarm_sinks import (
     format_alarm_html,
     format_alarm_text,
 )
-from scraperhryt.broker import InMemoryBroker, Message, Queue, Retry, RoutingKey
+from scraperhryt.broker import InMemoryBroker, Message, Queue, Retry, RoutingKey, Unavailable
 from scraperhryt.config import Settings
 from scraperhryt.models import AlarmEvent, LLMVerdict, NewsRecord, Stage
+from scraperhryt.pipeline import alarm as alarm_module
 from scraperhryt.pipeline.alarm import AlarmService
 from scraperhryt.store import InMemoryStore
 
@@ -216,8 +218,6 @@ def test_store_retry_is_retried_by_broker_then_dead_lettered(settings: Settings)
 
 
 def test_run_waits_for_indices_until_stop(settings: Settings) -> None:
-    import threading
-
     class NeverReadyStore(InMemoryStore):
         def __init__(self) -> None:
             super().__init__()
@@ -233,6 +233,61 @@ def test_run_waits_for_indices_until_stop(settings: Settings) -> None:
     threading.Timer(0.3, stop.set).start()
     assert service.run(stop_event=stop) == 0
     assert store.tries >= 1
+
+
+def test_es_outage_is_unavailable_and_does_not_exhaust_attempt_budget(settings: Settings) -> None:
+    """ES kesintisi (Unavailable) rabbitmq_max_attempts bütçesini tüketmez: mesaj kuyrukta kalır, ölü mektup olmaz."""
+
+    class DownStore(InMemoryStore):
+        def index_record(self, record, refresh=False, embedding=None):  # type: ignore[override]
+            raise Unavailable("Elasticsearch erişilemiyor (index_record)")
+
+    broker, store = InMemoryBroker(settings), DownStore()
+    broker.declare_topology()
+    service = AlarmService(settings, broker, store, sinks=[])
+    broker.publish(RoutingKey.ARTICLE_SCORED, make_record(score=None).to_message())
+
+    rounds = settings.rabbitmq_max_attempts + 2
+    assert service.run(max_messages=rounds) == rounds
+    assert len(broker.dead_letters) == 0 and broker.size(Queue.ARTICLES_SCORED) == 1
+    pending = broker.drain(Queue.ARTICLES_SCORED)[0]
+    assert pending.attempts == rounds and "erişilemiyor" in pending.headers["x-error"]
+
+
+def test_handle_waits_for_store_before_reraising(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Depo Retry fırlatınca servis ES yeniden erişilebilir olana dek bekler (geri basınç), sonra istisnayı iletir."""
+    monkeypatch.setattr(alarm_module, "_INDEX_RETRY_INITIAL_DELAY", 0.01)
+
+    class FlakyStore(InMemoryStore):
+        def __init__(self, outage_checks: int) -> None:
+            super().__init__()
+            self.outage_checks = outage_checks
+            self.ensure_calls = 0
+
+        def ensure_indices(self) -> None:
+            self.ensure_calls += 1
+            if self.ensure_calls <= self.outage_checks:
+                raise Unavailable("ES kapalı")
+
+        def index_record(self, record, refresh=False, embedding=None):  # type: ignore[override]
+            raise Unavailable("Elasticsearch erişilemiyor (index_record)")
+
+    broker, store = InMemoryBroker(settings), FlakyStore(outage_checks=2)
+    service = AlarmService(settings, broker, store, sinks=[])
+    with pytest.raises(Unavailable, match="index_record"):
+        service.handle(scored_message(make_record(score=None)))
+    assert store.ensure_calls == 3  # 2 başarısız denetim + 1 başarılı
+    assert store.records == {} and broker.published == []
+
+    # kapanış sinyali gelirse bekleme sonsuza dek sürmez; istisna yine iletilir
+    stop = threading.Event()
+    never = FlakyStore(outage_checks=10**6)
+    service2 = AlarmService(settings, broker, never, sinks=[])
+    service2._stop_event = stop
+    threading.Timer(0.05, stop.set).start()
+    with pytest.raises(Unavailable):
+        service2.handle(scored_message(make_record(score=None)))
+    assert 1 <= never.ensure_calls < 10**6
 
 
 def test_embedder_vectors_are_stored_and_failures_are_soft(tmp_path: Path) -> None:
@@ -267,6 +322,82 @@ def test_embedder_vectors_are_stored_and_failures_are_soft(tmp_path: Path) -> No
     plain = Settings(_env_file=None, alarm_log_path=str(tmp_path / "b.jsonl"))
     service3 = AlarmService(plain, broker, InMemoryStore(), sinks=[], embedder=Embedder())
     assert service3.embedder is None
+
+
+class DimsEmbedder:
+    def __init__(self, dims: int, *, fail: bool = False) -> None:
+        self.dims = dims
+        self.fail = fail
+        self.calls = 0
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("Ollama kapalı")
+        return [[0.5] * self.dims for _ in texts]
+
+
+def test_embedding_with_wrong_dims_is_dropped_per_record(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Model EMBEDDING_DIMS'ten farklı boyut üretirse kayıt vektörsüz yazılır; alarm akışı etkilenmez."""
+    settings = Settings(_env_file=None, ollama_embedding_model="mxbai-embed-large", embedding_dims=4, alarm_log_path=str(tmp_path / "a.jsonl"))
+    broker, store, sink = InMemoryBroker(settings), InMemoryStore(), RecordingSink()
+    service = AlarmService(settings, broker, store, sinks=[sink], embedder=DimsEmbedder(1024))
+    record = make_record(score=85)
+    with caplog.at_level(logging.ERROR, logger="scraperhryt.pipeline.alarm"):
+        service.handle(scored_message(record))
+    assert record.id in store.records and store.embeddings == {}
+    assert service.stats.embed_failures == 1 and service.stats.alarms_raised == 1
+    assert len(sink.events) == 1 and len(alarm_messages(broker)) == 1
+    assert any("1024" in r.getMessage() and "EMBEDDING_DIMS=4" in r.getMessage() for r in caplog.records)
+
+
+def test_run_probes_embedding_dims_at_startup(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """run(): boyut uyuşmazlığında vektör üretimi kapatılır (hata logu); model erişilemezse açık kalır."""
+    settings = Settings(_env_file=None, ollama_embedding_model="mxbai-embed-large", embedding_dims=4, alarm_log_path=str(tmp_path / "a.jsonl"))
+    broker = InMemoryBroker(settings)
+    broker.declare_topology()
+
+    wrong = DimsEmbedder(1024)
+    service = AlarmService(settings, broker, InMemoryStore(), sinks=[], embedder=wrong)
+    with caplog.at_level(logging.ERROR, logger="scraperhryt.pipeline.alarm"):
+        assert service.run() == 0
+    assert service.embedder is None and wrong.calls == 1
+    assert any("KAPATILDI" in r.getMessage() and "EMBEDDING_DIMS=4" in r.getMessage() for r in caplog.records)
+
+    ok = DimsEmbedder(4)
+    service_ok = AlarmService(settings, broker, InMemoryStore(), sinks=[], embedder=ok)
+    assert service_ok.run() == 0
+    assert service_ok.embedder is ok and ok.calls == 1
+
+    down = DimsEmbedder(1024, fail=True)
+    service_down = AlarmService(settings, broker, InMemoryStore(), sinks=[], embedder=down)
+    assert service_down.run() == 0
+    assert service_down.embedder is down  # erişilemeyen model başlangıçta kapatılmaz; denetim kayıt başına yapılır
+
+
+class MappingMismatchStore(InMemoryStore):
+    """``ElasticsearchStore`` gibi eşleme uyuşmazlığında vektör indekslemeyi kapatmış depo."""
+
+    embeddings_enabled = False
+
+
+def test_embedder_is_disabled_when_store_rejects_embeddings(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Depo (ensure_indices eşleme uzlaştırması) vektörleri kapattıysa kayıt başına boşa embedding üretilmez."""
+    settings = Settings(_env_file=None, ollama_embedding_model="nomic-embed-text", embedding_dims=4, alarm_log_path=str(tmp_path / "a.jsonl"))
+    broker, store, embedder = InMemoryBroker(settings), MappingMismatchStore(), DimsEmbedder(4)
+    service = AlarmService(settings, broker, store, sinks=[], embedder=embedder)
+    record = make_record(score=85)
+    with caplog.at_level(logging.WARNING, logger="scraperhryt.pipeline.alarm"):
+        service.handle(scored_message(record))
+    assert record.id in store.records and store.embeddings == {} and embedder.calls == 0
+    assert service.embedder is None and service.stats.alarms_raised == 1 and service.stats.embed_failures == 0
+    assert any("vektör üretimi KAPATILDI" in r.getMessage() for r in caplog.records)
+
+    # run(): başlangıç denetimi de depo bayrağına bakar; model hiç sorgulanmaz
+    broker.declare_topology()
+    probe = DimsEmbedder(4)
+    service_run = AlarmService(settings, broker, MappingMismatchStore(), sinks=[], embedder=probe)
+    assert service_run.run() == 0 and service_run.embedder is None and probe.calls == 0
 
 
 def test_default_sinks_are_built_from_settings(settings: Settings) -> None:

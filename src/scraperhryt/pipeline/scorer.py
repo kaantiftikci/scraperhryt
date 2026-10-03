@@ -2,8 +2,13 @@
 
 Politika: model yalnızca ham kararı (``LLMVerdict``) üretir; alarm kararı ``NewsRecord.apply_verdict`` ile
 deterministik olarak (``alarm_score >= alarm_threshold``) uygulanır. Bozuk JSON süreç içinde en fazla
-``MAX_LLM_ATTEMPTS`` kez denenir; yine olmazsa veya Ollama erişilemezse ``Retry`` fırlatılır (broker gecikmeli
-yeniden dener, ``rabbitmq_max_attempts`` sonrası ölü mektup).
+``MAX_LLM_ATTEMPTS`` kez denenir; yine olmazsa ``Retry`` fırlatılır (broker gecikmeli yeniden dener).
+
+Ollama kesintisi bir mesaj kaybı nedeni DEĞİLDİR: erişilemiyorsa / model yüklü değilse servis önce süreç içinde
+(``LLM_WAIT_SECONDS``'a kadar, ``stop_event``'e saygılı) Ollama'nın dönmesini bekler, sonra ``Unavailable`` ile
+(``TRANSIENT_MAX_ATTEMPTS`` tavanı) broker'a devreder. Broker'ın son denemesinde hâlâ puanlanamayan haber ölü
+mektuba gitmez; ``FALLBACK_MODEL`` etiketli sezgisel yedek kararla ``article.scored``'a yayınlanır ki
+Elasticsearch'e yazılsın (bkz. ``ScoringService``).
 """
 
 from __future__ import annotations
@@ -19,11 +24,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..broker import Broker, Message, Queue, Reject, Retry, RoutingKey
+from ..broker import Broker, Message, Queue, Reject, Retry, RoutingKey, Unavailable, attempt_limit_for
 from ..config import Settings
 from ..models import LLMVerdict, NewsRecord
 from ..textutil import excerpt, normalize_ws, tr_fold, tr_lower
-from .llm import LLM, LLMBadOutput, LLMUnavailable
+from .llm import LLM, HeuristicLLM, LLMBadOutput, LLMUnavailable, redact_url
 from .prompts import STRICT_JSON_REMINDER, TOPICS, build_system_prompt, build_user_prompt
 
 log = logging.getLogger(__name__)
@@ -33,6 +38,12 @@ RAW_LIMIT = 2000  # LLMVerdict.raw üst sınırı (karakter)
 MAX_LIST_ITEMS = 20
 MAX_TEXT_CHARS = 4000  # reason / summary üst sınırı
 SCORER_PREFETCH = 1  # LLM yavaş olduğundan tüketici aynı anda tek mesaj tutar
+# Ollama kesintisinde mesaj broker'a dönmeden önce süreç içinde beklenen azami süre (saniye); 0 = bekleme yok.
+LLM_WAIT_SECONDS = 300.0
+LLM_POLL_SECONDS = 1.0  # hazırlık denetimleri arası başlangıç aralığı (üstel artar)
+LLM_POLL_MAX_SECONDS = 30.0
+MAX_UNAVAILABLE_ROUNDS = 3  # bir mesaj için kesinti atlatıp yeniden puanlama tur sayısı (kesintili Ollama)
+FALLBACK_MODEL = "heuristic-fallback"  # son denemede sezgisel yedek kararın LLMVerdict.model etiketi
 
 _SCORE_KEYS = ("alarm_score", "score", "alarmScore", "alarm skoru")
 _TRUE_WORDS = {"true", "1", "yes", "evet", "doğru", "dogru", "alarm", "var"}
@@ -50,6 +61,7 @@ _TOPIC_ALIASES: dict[str, str] = {
     "secim": "siyaset",
     "ekonomik": "ekonomi",
     "piyasa": "ekonomi",
+    "para": "ekonomi",
     "ticaret": "ekonomi",
     "enerji": "ekonomi",
     "maliye": "ekonomi",
@@ -91,6 +103,8 @@ _TOPIC_ALIASES: dict[str, str] = {
     "genel": "diğer",
 }
 _TOPIC_BY_FOLD: dict[str, str] = {tr_fold(t): t for t in TOPICS}
+# "<konu> politikası" (ekonomi/para/maliye politikası...) konusu tamlayanın konusudur, "siyaset" değil.
+_POLICY_OF_RE = re.compile(r"^(.+?)\s+politikas[iı]$")
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -179,11 +193,18 @@ def normalize_topic(topic: str) -> str:
         return _TOPIC_BY_FOLD[folded]
     if folded in _TOPIC_ALIASES:
         return _TOPIC_ALIASES[folded]
-    for alias, canonical in _TOPIC_ALIASES.items():
-        if alias in folded:
-            return canonical
+    policy_of = _POLICY_OF_RE.match(folded)
+    if policy_of:
+        subject = normalize_topic(policy_of.group(1))
+        if subject != "diğer":
+            return subject
+    # Önce kanonik ad içerme ("ekonomi politikası" → ekonomi); takma ad araması sonra gelir, yoksa "politika"
+    # takma adı kanonik adı içeren her "<konu> politikası" biçimini siyasete çekerdi.
     for fold, canonical in _TOPIC_BY_FOLD.items():
         if fold in folded:
+            return canonical
+    for alias, canonical in _TOPIC_ALIASES.items():
+        if alias in folded:
             return canonical
     return "diğer"
 
@@ -240,22 +261,50 @@ class ScoringStats:
     rejected: int = 0
     llm_calls: int = 0
     bad_output: int = 0  # çözümlenemeyen model çıktısı (süreç içi tekrar)
-    unavailable: int = 0  # Ollama erişilemedi (broker yeniden deneme)
+    unavailable: int = 0  # LLM çağrısı altyapı hatasıyla başarısız (bağlantı, zaman aşımı, model yok...)
+    waits: int = 0  # Ollama kesintisi süreç içinde beklenip atlatıldı (mesaj broker'a dönmeden puanlandı)
     exhausted: int = 0  # MAX_LLM_ATTEMPTS sonunda hâlâ bozuk çıktı (broker yeniden deneme)
+    fallback: int = 0  # son denemede sezgisel yedek kararla yayınlanan haber (kayıt kaybı önlendi)
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
 
 
 class ScoringService:
-    """``Queue.ARTICLES_KEYWORD`` tüketicisi; her haberi LLM ile puanlar, ``article.scored`` ile yayınlar."""
+    """``Queue.ARTICLES_KEYWORD`` tüketicisi; her haberi LLM ile puanlar, ``article.scored`` ile yayınlar.
 
-    def __init__(self, settings: Settings, broker: Broker, llm: LLM) -> None:
+    Dayanıklılık politikası (anahtar kelime eşleşen haberler asla sessizce kaybolmaz):
+
+    * Ollama erişilemiyor / model yüklü değil → ``Unavailable``. ``handle`` önce ``llm_wait_seconds`` boyunca
+      (``stop_event``'e saygılı, üstel geri çekilmeli) Ollama'nın dönmesini bekler ve aynı haberi süreç içinde
+      yeniden puanlar; bekleme sonuçsuz kalırsa mesaj broker'a ``Unavailable`` ile döner (tavan
+      ``TRANSIENT_MAX_ATTEMPTS``, saatlerce kesinti ölü mektup üretmez).
+    * Ollama ayakta ama çağrı başarısız (zaman aşımı, sunucu hatası, bellek yetersiz...) → ``Retry``
+      (tavan ``rabbitmq_max_attempts``).
+    * Broker'ın SON denemesinde hâlâ puanlanamayan haber ölü mektuba gitmez: ``HeuristicLLM`` ile
+      ``FALLBACK_MODEL`` etiketli yedek karar üretilir ve haber yine ``article.scored`` ile yayınlanır ki
+      Elasticsearch/alarm/raporlama katmanlarına ulaşsın (hata loglanır, ``stats.fallback`` artar).
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        broker: Broker,
+        llm: LLM,
+        *,
+        stop_event: threading.Event | None = None,
+        llm_wait_seconds: float = LLM_WAIT_SECONDS,
+        llm_poll_seconds: float = LLM_POLL_SECONDS,
+    ) -> None:
         self.settings = settings
         self.broker = broker
         self.llm = llm
+        self.stop_event = stop_event if stop_event is not None else threading.Event()
+        self.llm_wait_seconds = max(0.0, float(llm_wait_seconds))
+        self.llm_poll_seconds = max(0.01, float(llm_poll_seconds))
         self.system_prompt = build_system_prompt(settings.alarm_threshold)
         self.stats = ScoringStats()
+        self._fallback = HeuristicLLM(settings)
 
     def build_prompts(self, record: NewsRecord) -> tuple[str, str]:
         """(system, user) istem çifti; içerik ``ollama_max_content_chars`` ile kısaltılır."""
@@ -263,10 +312,54 @@ class ScoringService:
             record, max_content_chars=self.settings.ollama_max_content_chars
         )
 
+    # --- Ollama hazırlık denetimi ---
+    def llm_ready(self) -> bool:
+        """Ollama erişilebilir VE yapılandırılan model yüklü mü?"""
+        return bool(self.llm.health() and self.llm.model_available())
+
+    def wait_for_llm(self, max_wait: float | None = None) -> bool:
+        """Ollama hazır olana dek bekler (üstel geri çekilme: ``llm_poll_seconds`` → ``LLM_POLL_MAX_SECONDS``).
+
+        ``True`` = hazır; ``False`` = ``max_wait`` (varsayılan ``llm_wait_seconds``) doldu ya da ``stop_event``
+        set edildi. ``max_wait`` 0 ise beklemeden tek bir denetim yapılır.
+        """
+        limit = self.llm_wait_seconds if max_wait is None else max(0.0, float(max_wait))
+        deadline = time.monotonic() + limit
+        delay = self.llm_poll_seconds
+        polls = 0
+        while True:
+            if self.llm_ready():
+                if polls:
+                    log.info(
+                        "Ollama yeniden hazır (%s, model=%s)",
+                        redact_url(self.settings.ollama_base_url),
+                        self.llm.model_name,
+                    )
+                return True
+            remaining = deadline - time.monotonic()
+            if self.stop_event.is_set() or remaining <= 0:
+                return False
+            pause = min(delay, remaining)
+            if polls == 0:
+                log.warning(
+                    "Ollama hazır değil (%s, model=%s); en fazla %.0f sn beklenecek, mesaj broker'a dönmeyecek",
+                    redact_url(self.settings.ollama_base_url),
+                    self.llm.model_name,
+                    limit,
+                )
+            else:
+                log.debug("Ollama hâlâ hazır değil; %.1f sn sonra yeniden denetlenecek", pause)
+            polls += 1
+            self.stop_event.wait(pause)
+            delay = min(delay * 2, LLM_POLL_MAX_SECONDS)
+
+    # --- puanlama ---
     def score_record(self, record: NewsRecord) -> NewsRecord:
-        """Kaydı LLM ile puanlar ve ``apply_verdict`` uygular (saf: broker'a yazmaz).
+        """Kaydı LLM ile puanlar ve ``apply_verdict`` uygular (saf: broker'a yazmaz, beklemez).
 
         ``LLMVerdict.latency_ms`` tüm denemelerin toplam süresidir; ``attempts`` başarılı denemenin sırasıdır.
+        Ollama erişilemiyorsa / model yoksa ``Unavailable``, Ollama ayakta ama çağrı başarısızsa ``Retry``;
+        ``MAX_LLM_ATTEMPTS`` denemede geçerli karar çıkmazsa ``Retry`` fırlatır.
         """
         system, user = self.build_prompts(record)
         prompt = user
@@ -287,10 +380,16 @@ class ScoringService:
                 )
             except LLMUnavailable as exc:
                 self.stats.unavailable += 1
-                log.warning(
-                    "LLM erişilemiyor, mesaj yeniden denenecek [%s] %s: %s", record.source, title, exc
-                )
-                raise Retry(f"LLM erişilemiyor: {exc}") from exc
+                if self.llm_ready():
+                    log.warning(
+                        "Ollama ayakta ama LLM çağrısı başarısız, mesaj yeniden denenecek [%s] %s: %s",
+                        record.source,
+                        title,
+                        exc,
+                    )
+                    raise Retry(f"LLM çağrısı başarısız: {exc}") from exc
+                log.warning("LLM erişilemiyor [%s] %s: %s", record.source, title, exc)
+                raise Unavailable(f"LLM erişilemiyor: {exc}") from exc
             except LLMBadOutput as exc:
                 last_error = exc
                 self.stats.bad_output += 1
@@ -309,6 +408,48 @@ class ScoringService:
         self.stats.exhausted += 1
         raise Retry(f"LLM {MAX_LLM_ATTEMPTS} denemede geçerli karar üretemedi: {last_error}") from last_error
 
+    def score_with_recovery(self, record: NewsRecord) -> NewsRecord:
+        """``score_record`` + Ollama kesintisini süreç içinde atlatma.
+
+        ``Unavailable`` gelirse Ollama'nın dönmesi ``llm_wait_seconds``'a kadar beklenir ve aynı haber yeniden
+        puanlanır (en fazla ``MAX_UNAVAILABLE_ROUNDS`` tur); bekleme sonuçsuz kalırsa istisna broker'a geçer.
+        """
+        title = excerpt(record.title, 80)
+        round_no = 1
+        while True:
+            try:
+                return self.score_record(record)
+            except Unavailable:
+                if self.llm_wait_seconds <= 0 or round_no >= MAX_UNAVAILABLE_ROUNDS or not self.wait_for_llm():
+                    raise
+                round_no += 1
+                self.stats.waits += 1
+                log.info(
+                    "Ollama kesintisi atlatıldı; haber süreç içinde yeniden puanlanıyor (tur %d/%d) [%s] %s",
+                    round_no,
+                    MAX_UNAVAILABLE_ROUNDS,
+                    record.source,
+                    title,
+                )
+
+    def fallback_verdict(self, record: NewsRecord, error: Exception, attempts: int) -> LLMVerdict:
+        """Son broker denemesinde LLM hâlâ başarısızsa sezgisel yedek karar (``FALLBACK_MODEL``) üretir.
+
+        ``attempts`` broker düzeyindeki deneme sayısıdır; gerekçe hatayı ve yedek olduğunu açıkça belirtir.
+        """
+        data = self._fallback.evaluate(title=record.title, subtitle=record.subtitle, content=record.content)
+        data["reason"] = (
+            f"LLM skorlaması {attempts} denemede tamamlanamadı ({excerpt(str(error), 200)}); "
+            f"sezgisel yedek değerlendirme uygulandı. {coerce_text(data.get('reason'))}"
+        )
+        return build_verdict(
+            data,
+            model=FALLBACK_MODEL,
+            threshold=self.settings.alarm_threshold,
+            attempts=attempts,
+            raw=json.dumps(data, ensure_ascii=False, default=str),
+        )
+
     def handle(self, msg: Message) -> None:
         self.stats.received += 1
         try:
@@ -317,7 +458,24 @@ class ScoringService:
             self.stats.rejected += 1
             raise Reject(f"Geçersiz haber mesajı (article.keyword): {excerpt(str(exc), 300)}") from exc
 
-        record = self.score_record(record)
+        try:
+            record = self.score_with_recovery(record)
+        except Retry as exc:
+            attempts = msg.attempts + 1
+            limit = attempt_limit_for(self.settings, exc)
+            if limit <= 0 or attempts < limit:
+                raise
+            # Son deneme: ölü mektup yerine yedek kararla yayınla ki haber ES'e/alarma/raporlamaya ulaşsın.
+            self.stats.fallback += 1
+            log.error(
+                "SKORLAMA BAŞARISIZ: haber %d denemede LLM ile puanlanamadı, sezgisel yedek kararla yayınlanıyor "
+                "[%s] %s: %s",
+                attempts,
+                record.source,
+                excerpt(record.title, 80),
+                exc,
+            )
+            record.apply_verdict(self.fallback_verdict(record, exc, attempts), self.settings.alarm_threshold)
         self.broker.publish(RoutingKey.ARTICLE_SCORED, record.to_message())
         self.stats.scored += 1
         if record.is_alarm:
@@ -338,7 +496,13 @@ class ScoringService:
         )
 
     def run(self, stop_event: threading.Event | None = None, max_messages: int | None = None) -> int:
-        """``q.articles.keyword`` kuyruğunu tüketir; işlenen mesaj sayısını döndürür."""
+        """``q.articles.keyword`` kuyruğunu tüketir; işlenen mesaj sayısını döndürür.
+
+        Tüketime başlamadan önce Ollama'nın hazır olması ``llm_wait_seconds``'a kadar beklenir (soğuk başlangıç,
+        model indirme); süre dolarsa tüketim yine başlar ve her mesaj kendi bekleme/yeniden deneme yolunu izler.
+        """
+        if stop_event is not None:
+            self.stop_event = stop_event
         self.broker.declare_topology()
         log.info(
             "LLM skorlama başlıyor: kuyruk=%s, model=%s, eşik=%d, içerik sınırı=%d karakter",
@@ -347,14 +511,11 @@ class ScoringService:
             self.settings.alarm_threshold,
             self.settings.ollama_max_content_chars,
         )
-        if not self.llm.health():
+        if not self.wait_for_llm():
             log.warning(
-                "Ollama şu an erişilemiyor (%s); mesajlar gecikmeli yeniden denenecek",
-                self.settings.ollama_base_url,
-            )
-        elif not self.llm.model_available():
-            log.warning(
-                "Model '%s' Ollama'da yüklü görünmüyor; `ollama pull %s` çalıştırın",
+                "Ollama hazır olmadan tüketime başlanıyor (%s, model=%s); mesajlar Ollama dönene dek bekletilip "
+                "gecikmeli yeniden denenecek. Çözüm: `ollama serve` ve `ollama pull %s`",
+                redact_url(self.settings.ollama_base_url),
                 self.llm.model_name,
                 self.llm.model_name,
             )
@@ -362,7 +523,7 @@ class ScoringService:
             Queue.ARTICLES_KEYWORD,
             self.handle,
             prefetch=SCORER_PREFETCH,
-            stop_event=stop_event,
+            stop_event=self.stop_event,
             max_messages=max_messages,
         )
         log.info("LLM skorlama durdu: %d mesaj işlendi, istatistik=%s", processed, self.stats.as_dict())

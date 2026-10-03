@@ -4,12 +4,19 @@
 ``llm.generate_text`` ile anlatı üretir; LLM erişilemez ya da bozuk çıktı verirse deterministik Türkçe şablon
 anlatı kullanılır ve ``Report.model`` ``"template"`` olur. ``report_id`` pencere (+ alarm kimlikleri) üzerinden
 deterministiktir; aynı rapor yeniden üretildiğinde ``news-reports``'ta üstüne yazılır.
+
+Alarm özetinde (``top_alarms`` verildiğinde) istatistikler depodan değil, özetlenen alarm listesinden türetilir
+(``alarm_stats``): depo istatistikleri haberin yayın tarihine (``@timestamp``) göre pencerelenir, alarmlar ise
+yükseltilme anına göre toplanır; iki eksen örtüşmediğinden depo sayıları özetteki alarmlarla çelişirdi.
+Depodan kurulan (periyodik / isteğe bağlı) raporlarda ise alarm listesi de haberin yayın tarihine göre seçilir
+(``_top_alarms_from_store``); böylece anlatıdaki "Alarm: N" sayısı ve listelenen alarmlar aynı ekseni paylaşır.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -83,6 +90,50 @@ def rank_alarms(alarms: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return sorted(summaries, key=_alarm_rank_key)
 
 
+def alarm_stats(
+    alarms: Sequence[Mapping[str, Any]], window_start: datetime, window_end: datetime
+) -> dict[str, Any]:
+    """Alarm özeti istatistikleri: ``store.stats`` ile aynı anahtarlar, ama yalnızca verilen alarmlardan türetilir.
+
+    ``total`` ve ``alarms`` özetlenen alarm sayısıdır; dağılımlar kaynak / eşleşen anahtar kelime / kategori
+    üzerinden, ``by_hour`` yükseltilme saatine göre sayılır. Böylece anlatıdaki her sayı aynı listeyi anlatır.
+    """
+    by_source: Counter[str] = Counter()
+    by_keyword: Counter[str] = Counter()
+    by_category: Counter[str] = Counter()
+    hours: Counter[datetime] = Counter()
+    scores: list[int] = []
+    for alarm in alarms:
+        by_source[flat_text(alarm.get("source"))] += 1
+        keywords = alarm.get("matched_keywords")
+        for keyword in keywords if isinstance(keywords, list | tuple) else []:
+            by_keyword[str(keyword)] += 1
+        category = flat_text(alarm.get("category"))
+        if category:
+            by_category[category] += 1
+        raised = parse_datetime(alarm.get("raised_at") or alarm.get("published_at"))
+        if raised is not None:
+            hours[raised.astimezone(UTC).replace(minute=0, second=0, microsecond=0)] += 1
+        scores.append(_as_int(alarm.get("alarm_score")))
+
+    def ordered(counter: Counter[str]) -> dict[str, int]:
+        return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    return {
+        "since": to_aware(window_start).isoformat(),
+        "until": to_aware(window_end).isoformat(),
+        "total": len(scores),
+        "alarms": len(scores),
+        "by_source": ordered(by_source),
+        "by_keyword": ordered(by_keyword),
+        "by_category": ordered(by_category),
+        "avg_alarm_score": round(sum(scores) / len(scores), 2) if scores else 0.0,
+        "by_hour": [
+            {"ts": hour.isoformat(), "count": count, "alarms": count} for hour, count in sorted(hours.items())
+        ],
+    }
+
+
 def report_id_for(
     kind: str, window_start: datetime, window_end: datetime, alarm_ids: Sequence[str] = ()
 ) -> str:
@@ -108,9 +159,10 @@ def build_template_narrative(
     lines = [f"{kind_label(kind)} — {format_tr(window_start)} ile {format_tr(window_end)} arası (Türkiye saati)."]
 
     if kind == "alarm_digest":
+        top_score = max((_as_int(alarm.get("alarm_score")) for alarm in top_alarms), default=0)
         lines.append(
-            f"Yönetici özeti: Bu özet {len(top_alarms)} alarm içerir. Aynı pencerede sisteme giren haber sayısı "
-            f"{total}; bunların {alarms} tanesi alarm olarak işaretlendi."
+            f"Yönetici özeti: Bu özet {len(top_alarms)} alarm içerir; ortalama alarm skoru {avg_text}, "
+            f"en yüksek skor {top_score}."
         )
     elif total == 0:
         lines.append("Yönetici özeti: Bu pencerede işlenmiş haber bulunmuyor.")
@@ -170,8 +222,9 @@ class ReportBuilder:
     ) -> Report:
         """Raporu kurar (depoya yazmaz, yayınlamaz).
 
-        ``top_alarms`` verilirse (alarm özeti) depo yerine bu liste kullanılır ve rapor kimliği alarm kimliklerini
-        de içerir; verilmezse pencere içindeki alarmlar depodan skora göre seçilir (en fazla ``TOP_ALARMS_LIMIT``).
+        ``top_alarms`` verilirse (alarm özeti) depo sorgulanmaz: alarm listesi ve istatistikler (``alarm_stats``)
+        bu listeden türetilir, rapor kimliği alarm kimliklerini de içerir. Verilmezse pencere istatistikleri
+        ``store.stats`` ile, alarmlar depodan skora göre seçilir (en fazla ``TOP_ALARMS_LIMIT``).
         ``narrative=False`` LLM'i çağırmaz; anlatı şablondan üretilir.
         """
         kind = (kind or "").strip()
@@ -181,13 +234,15 @@ class ReportBuilder:
         if start > end:
             raise ValueError(f"Rapor penceresi geçersiz: başlangıç ({start.isoformat()}) bitişten sonra")
 
-        raw_stats = self.store.stats(start, end)
-        stats: dict[str, Any] = dict(raw_stats) if isinstance(raw_stats, Mapping) else {}
+        stats: dict[str, Any]
         if top_alarms is None:
+            raw_stats = self.store.stats(start, end)
+            stats = dict(raw_stats) if isinstance(raw_stats, Mapping) else {}
             alarms = self._top_alarms_from_store(start, end)
             report_id = report_id_for(kind, start, end)
         else:
             alarms = rank_alarms(top_alarms)
+            stats = alarm_stats(alarms, start, end)
             report_id = report_id_for(kind, start, end, [a["alarm_id"] for a in alarms])
 
         if narrative:
@@ -220,8 +275,14 @@ class ReportBuilder:
 
     # --- yardımcılar ---
     def _top_alarms_from_store(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        """Pencereye haber tarihine (``published_at``) göre düşen alarmlar; ``store.stats`` ile aynı eksen.
+
+        Liste yükseltilme anına göre seçilseydi geç kazınan ya da yeniden skorlanan eski bir haber listede görünür
+        ama istatistikteki "Alarm: N" sayısına girmezdi. Alarm en erken haber yayımlandığında yükseltilebildiğinden
+        ``raised_at >= start`` ön filtresi aday kaçırmaz; yayın tarihi olmayan alarmda yükseltilme anı esas alınır.
+        """
         docs = self.store.recent_alarms(since=start, size=_RECENT_ALARMS_FETCH)
-        in_window = [doc for doc in docs if _within(doc.get("raised_at"), end)]
+        in_window = [doc for doc in docs if _in_window(doc, start, end)]
         return rank_alarms(in_window)[:TOP_ALARMS_LIMIT]
 
     def _narrative(
@@ -248,9 +309,9 @@ class ReportBuilder:
         return text, self.llm.model_name
 
 
-def _within(raised_at: Any, end: datetime) -> bool:
-    parsed = parse_datetime(raised_at)
-    return parsed is None or parsed <= end
+def _in_window(doc: Mapping[str, Any], start: datetime, end: datetime) -> bool:
+    ts = parse_datetime(doc.get("published_at")) or parse_datetime(doc.get("raised_at"))
+    return ts is None or start <= ts <= end
 
 
 def _alarm_rank_key(alarm: Mapping[str, Any]) -> tuple[int, float, str]:

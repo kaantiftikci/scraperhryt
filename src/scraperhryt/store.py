@@ -11,8 +11,15 @@ turkish_stop + turkish_stemmer) indekslenir; arama BM25 + yenilik (gauss) ağır
 sorgusudur. ``ollama_embedding_model`` ayarlıysa ``embedding`` alanı ``dense_vector`` olarak eklenir ve
 ``knn_search`` kullanılabilir.
 
-Yazma işlemlerinde Elasticsearch'e ulaşılamazsa ``broker.Retry`` fırlatılır; böylece tüketici mesajı
-gecikmeli olarak yeniden dener. Diğer hatalar (geçersiz istek vb.) olduğu gibi yükselir.
+Yazma/okuma işlemlerinde Elasticsearch'e ulaşılamazsa (bağlantı hatası) ya da düğüm HTTP ile yanıt verip henüz
+hazır değilse (429 ``es_rejected_execution``/devre kesici, 503 ``unavailable_shards``/``cluster_block``, 502/504)
+``broker.Unavailable`` (``Retry`` alt tipi) fırlatılır; böylece tüketici mesajı gecikmeli olarak yeniden dener ve
+kısa bir ES kesintisi ``rabbitmq_max_attempts`` bütçesini tüketip kayıtları ölü mektuba düşürmez. Diğer hatalar
+(geçersiz istek vb.) olduğu gibi yükselir.
+
+``ensure_indices`` var olan ``news-articles`` indeksinin ``embedding`` eşlemesini ayarlarla uzlaştırır: eşleme
+yoksa eklenir (``put_mapping``); boyut/tür uyuşmuyorsa hata loglanır ve vektör indeksleme kapatılır, kayıtlar
+vektörsüz yazılmaya devam eder (hiçbir kayıt kaybolmaz).
 """
 
 from __future__ import annotations
@@ -27,11 +34,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from elasticsearch import ApiError as ESApiError
 from elasticsearch import BadRequestError, Elasticsearch, NotFoundError
 from elasticsearch import ConnectionError as ESConnectionError
 from elasticsearch import TransportError as ESTransportError
 
-from .broker import Retry
+from .broker import Unavailable
 from .config import Settings, get_settings
 from .models import AlarmEvent, NewsRecord, Report
 from .textutil import tr_lower
@@ -44,7 +52,13 @@ TOP_ALARM_FIELDS = [
     "id", "title", "content_url", "source", "alarm_score", "alarm_reason", "llm_summary", "published_at",
     "matched_keywords",
 ]
+STATS_SOURCE_BUCKETS = 20   # stats(): by_source en fazla bu kadar kaynak
+STATS_KEYWORD_BUCKETS = 50  # stats(): by_keyword / by_category en fazla bu kadar anahtar
+STATS_TOP_ALARMS = 10       # stats(): top_alarms uzunluğu
 RECENCY_SCALE_DAYS = 3.0  # bellek içi arama: skor × 1/(1 + yaş_gün/3); ES'te gauss(scale=3d)
+# ES'in HTTP ile yanıt verdiği ama isteği karşılayamadığı geçici durumlar (ApiError, TransportError DEĞİL): yeniden
+# denenmeli, ölü mektup olmamalı. 400 (mapper_parsing vb.) ve 404 gibi kalıcı hatalar kapsam dışıdır.
+TRANSIENT_ES_STATUSES = frozenset({429, 502, 503, 504})
 _MIN_TOKEN_LEN = 2
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _HIGHLIGHT = {
@@ -357,16 +371,16 @@ def build_search_query(
 def build_stats_aggs() -> dict[str, Any]:
     """``stats()`` için toplulaştırmalar (``_parse_stats_response`` ile çözümlenir)."""
     return {
-        "by_source": {"terms": {"field": "source", "size": 20}},
-        "by_keyword": {"terms": {"field": "matched_keywords", "size": 50}},
-        "by_category": {"terms": {"field": "category", "size": 50, "exclude": [""]}},
+        "by_source": {"terms": {"field": "source", "size": STATS_SOURCE_BUCKETS}},
+        "by_keyword": {"terms": {"field": "matched_keywords", "size": STATS_KEYWORD_BUCKETS}},
+        "by_category": {"terms": {"field": "category", "size": STATS_KEYWORD_BUCKETS, "exclude": [""]}},
         "alarms": {
             "filter": {"term": {"is_alarm": True}},
             "aggs": {
                 "avg_alarm_score": {"avg": {"field": "alarm_score"}},
                 "top_alarms": {
                     "top_hits": {
-                        "size": 10,
+                        "size": STATS_TOP_ALARMS,
                         "sort": [{"alarm_score": {"order": "desc"}}, {"@timestamp": {"order": "desc"}}],
                         "_source": {"includes": list(TOP_ALARM_FIELDS)},
                     }
@@ -374,7 +388,7 @@ def build_stats_aggs() -> dict[str, Any]:
             },
         },
         "by_hour": {
-            "date_histogram": {"field": "@timestamp", "calendar_interval": "1h"},
+            "date_histogram": {"field": "@timestamp", "calendar_interval": "1h", "min_doc_count": 1},
             "aggs": {"alarms": {"filter": {"term": {"is_alarm": True}}}},
         },
     }
@@ -464,11 +478,20 @@ class ElasticsearchStore:
         try:
             return fn(**kwargs)
         except (ESConnectionError, ESTransportError) as exc:
-            raise Retry(f"Elasticsearch erişilemiyor ({what}): {_describe(exc)}") from exc
+            raise Unavailable(f"Elasticsearch erişilemiyor ({what}): {_describe(exc)}") from exc
+        except ESApiError as exc:
+            # elasticsearch-py 8: ApiError TransportError'ın alt tipi değildir; 429/502/503/504 (parça atama, devre
+            # kesici, küme bloğu) düğüm ayağa kalkana dek sürer ve deneme bütçesini tüketmemelidir.
+            if exc.status_code in TRANSIENT_ES_STATUSES:
+                raise Unavailable(
+                    f"Elasticsearch geçici olarak erişilemiyor ({what}, HTTP {exc.status_code}): {_describe(exc)}"
+                ) from exc
+            raise
 
-    def _create_index(self, name: str, body: dict[str, Any]) -> None:
+    def _create_index(self, name: str, body: dict[str, Any]) -> bool:
+        """İndeks yoksa oluşturur; bu çağrıda oluşturulduysa True, zaten varsa False döndürür."""
         if self._write("indices.exists", self.es.indices.exists, index=name):
-            return
+            return False
         try:
             self._write(
                 "indices.create", self.es.indices.create, index=name, settings=body["settings"], mappings=body["mappings"]
@@ -476,13 +499,66 @@ class ElasticsearchStore:
         except BadRequestError as exc:
             if "resource_already_exists_exception" in f"{exc.message} {exc.body}":
                 log.info("İndeks eşzamanlı olarak başka bir süreç tarafından oluşturuldu: %s", name)
-                return
+                return False
             raise
         log.info("Elasticsearch indeksi oluşturuldu: %s", name)
+        return True
+
+    def _disable_embeddings(self, reason: str) -> None:
+        log.error(
+            "%s; vektör indeksleme KAPATILDI, kayıtlar vektörsüz yazılacak (kNN arama devre dışı). EMBEDDING_DIMS'i "
+            "modele (%s) göre düzeltin ya da %s indeksini yeniden oluşturun",
+            reason,
+            self.settings.ollama_embedding_model,
+            self.index_articles,
+        )
+        self.embeddings_enabled = False
+
+    def _reconcile_embedding_mapping(self, expected: dict[str, Any]) -> None:
+        """Var olan ``news-articles`` indeksinin ``embedding`` eşlemesini ayarlarla uzlaştırır.
+
+        Eşleme yoksa (model indeks oluşturulduktan sonra açıldı) ``put_mapping`` ile eklenir; aksi halde ES alanı
+        dinamik olarak ``float`` eşler ve her kNN sorgusu 400 ile sessizce başarısız olurdu. Tür/boyut uyuşmuyorsa
+        (ör. EMBEDDING_DIMS değişti ama indeks yeniden oluşturulmadı) her belge 400 ``mapper_parsing_exception``
+        alıp ölü mektuba düşerdi; bunun yerine vektör indeksleme kapatılır.
+        """
+        res = dict(self._write("indices.get_mapping", self.es.indices.get_mapping, index=self.index_articles))
+        # yanıt anahtarı gerçek indeks adıdır; takma ad kullanılıyorsa ilk (tek) girdi alınır
+        index_body = res.get(self.index_articles) or next(iter(res.values()), {})
+        properties = ((index_body or {}).get("mappings") or {}).get("properties") or {}
+        current = properties.get("embedding")
+        if current is None:
+            try:
+                self._write(
+                    "indices.put_mapping",
+                    self.es.indices.put_mapping,
+                    index=self.index_articles,
+                    properties={"embedding": expected},
+                )
+            except BadRequestError as exc:
+                self._disable_embeddings(
+                    f"{self.index_articles} indeksine embedding eşlemesi eklenemedi: {_describe(exc)}"
+                )
+                return
+            log.info(
+                "%s indeksine embedding eşlemesi eklendi: dense_vector(dims=%d)", self.index_articles, expected["dims"]
+            )
+            return
+        current_type = current.get("type")
+        current_dims = current.get("dims")
+        if current_type == expected["type"] and current_dims is not None and int(current_dims) == int(expected["dims"]):
+            return
+        self._disable_embeddings(
+            f"{self.index_articles} indeksinde embedding eşlemesi {current_type}(dims={current_dims}), "
+            f"ayarlar {expected['type']}(dims={expected['dims']}) bekliyor"
+        )
 
     # --- ArticleStore ---
     def ensure_indices(self) -> None:
-        self._create_index(self.index_articles, build_article_mapping(self.settings))
+        article_mapping = build_article_mapping(self.settings)
+        created = self._create_index(self.index_articles, article_mapping)
+        if not created and self.embeddings_enabled:
+            self._reconcile_embedding_mapping(article_mapping["mappings"]["properties"]["embedding"])
         self._create_index(self.index_alarms, build_alarm_mapping(self.settings))
         self._create_index(self.index_reports, build_report_mapping(self.settings))
 
@@ -491,13 +567,38 @@ class ElasticsearchStore:
     ) -> None:
         doc = record.to_es_document()
         if embedding is not None:
-            if self.embeddings_enabled:
-                doc["embedding"] = [float(x) for x in embedding]
-            else:
+            expected = int(self.settings.embedding_dims)
+            if not self.embeddings_enabled:
                 log.warning(
-                    "embedding verildi ama OLLAMA_EMBEDDING_MODEL boş; vektör indekslenmiyor (kayıt %s)", record.id
+                    "embedding verildi ama vektör indeksleme kapalı (OLLAMA_EMBEDDING_MODEL boş ya da eşleme "
+                    "uyuşmazlığı); kayıt %s vektörsüz yazılıyor",
+                    record.id,
                 )
-        self._write("index_record", self.es.index, index=self.index_articles, id=record.id, document=doc, refresh=refresh)
+            elif len(embedding) != expected:
+                # dense_vector eşlemesi EMBEDDING_DIMS boyutundadır; uyuşmayan vektör ES'te 400 (mapper_parsing)
+                # üretir ve kaydın tamamını kaybettirir. Vektörsüz yazmak her zaman tercih edilir.
+                log.error(
+                    "Embedding boyutu %d, eşleme %d (EMBEDDING_DIMS); kayıt %s vektörsüz yazılıyor. "
+                    "EMBEDDING_DIMS'i modele göre düzeltip %s indeksini yeniden oluşturun",
+                    len(embedding),
+                    expected,
+                    record.id,
+                    self.index_articles,
+                )
+            else:
+                doc["embedding"] = [float(x) for x in embedding]
+        try:
+            self._write("index_record", self.es.index, index=self.index_articles, id=record.id, document=doc, refresh=refresh)
+        except BadRequestError as exc:
+            # Son savunma hattı: canlı eşleme vektörü reddediyorsa (ensure_indices bu süreçte çalışmadı ya da eşleme
+            # sonradan değişti) kayıt vektörsüz yazılır; belge ölü mektuba düşmez.
+            if "embedding" not in doc or "mapper_parsing_exception" not in f"{exc.message} {exc.body}":
+                raise
+            self._disable_embeddings(f"{self.index_articles} eşlemesi embedding vektörünü reddetti: {_describe(exc)}")
+            plain = {key: value for key, value in doc.items() if key != "embedding"}
+            self._write(
+                "index_record", self.es.index, index=self.index_articles, id=record.id, document=plain, refresh=refresh
+            )
 
     def index_alarm(self, event: AlarmEvent, refresh: bool = False) -> None:
         self._write(
@@ -521,14 +622,14 @@ class ElasticsearchStore:
 
     def get_record(self, id: str) -> dict[str, Any] | None:
         try:
-            res = self.es.get(index=self.index_articles, id=id, source_excludes=["embedding"])
+            res = self._write("get_record", self.es.get, index=self.index_articles, id=id, source_excludes=["embedding"])
         except NotFoundError:
             return None
         return dict(res["_source"])
 
     def get_alarm(self, alarm_id: str) -> dict[str, Any] | None:
         try:
-            res = self.es.get(index=self.index_alarms, id=alarm_id)
+            res = self._write("get_alarm", self.es.get, index=self.index_alarms, id=alarm_id)
         except NotFoundError:
             return None
         return dict(res["_source"])
@@ -713,6 +814,9 @@ class InMemoryStore:
             self.records[record.id] = record.to_es_document()
             if embedding is not None:
                 self.embeddings[record.id] = [float(x) for x in embedding]
+            else:
+                # ES'teki ``index`` tüm _source'u değiştirir: vektörsüz yeniden yazılan kayıt kNN'den düşer
+                self.embeddings.pop(record.id, None)
 
     def index_alarm(self, event: AlarmEvent, refresh: bool = False) -> None:
         with self._lock:
@@ -829,23 +933,27 @@ class InMemoryStore:
             else 0.0
         )
 
-        def ordered(counter: Counter[str]) -> dict[str, int]:
-            return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+        def ordered(counter: Counter[str], limit: int) -> dict[str, int]:
+            # ES terms toplulaştırması gibi: en sık görülen ``limit`` anahtar, sayı azalan / anahtar artan sırada
+            return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:limit])
 
         return {
             "since": _iso(since) if since else None,
             "until": _iso(until) if until else None,
             "total": len(items),
             "alarms": len(alarm_docs),
-            "by_source": ordered(by_source),
-            "by_keyword": ordered(by_keyword),
-            "by_category": ordered(by_category),
+            "by_source": ordered(by_source, STATS_SOURCE_BUCKETS),
+            "by_keyword": ordered(by_keyword, STATS_KEYWORD_BUCKETS),
+            "by_category": ordered(by_category, STATS_KEYWORD_BUCKETS),
             "avg_alarm_score": avg,
             "by_hour": [
                 {"ts": hour.isoformat(), "count": counts[0], "alarms": counts[1]}
                 for hour, counts in sorted(hours.items())
             ],
-            "top_alarms": [{k: d.get(k) for k in TOP_ALARM_FIELDS} for _ts, d in alarm_docs[:10]],
+            # ES ``_source.includes`` gibi: belgede olmayan alan None olarak eklenmez
+            "top_alarms": [
+                {k: d[k] for k in TOP_ALARM_FIELDS if k in d} for _ts, d in alarm_docs[:STATS_TOP_ALARMS]
+            ],
         }
 
     def list_reports(self, kind: str | None = None, size: int = 20) -> list[dict[str, Any]]:

@@ -37,8 +37,14 @@ scraperhryt run-all                   # tek süreç; Ctrl+C ile düzgün kapanı
 scraperhryt scrape | scraperhryt filter | scraperhryt score | scraperhryt alarm | scraperhryt report | scraperhryt api
 ```
 
-Başlatma sırası önemsizdir: her servis topolojiyi ve indeksleri idempotent olarak oluşturur, bağımlılık yoksa
-üstel geri çekilmeyle bekler.
+Başlatma sırası büyük ölçüde önemsizdir: her servis topolojiyi ve indeksleri idempotent olarak oluşturur ve
+RabbitMQ yoksa tüm servisler üstel geri çekilmeyle (1 s → 30 s, 8 deneme) bağlanmayı bekler. Elasticsearch için
+ise yalnızca bağımsız `alarm` servisi başlangıçta üstel geri çekilmeyle (1 s → 30 s) bekler; `report`, `api`,
+`ask` ve `run-all` komutları başlarken Elasticsearch'e erişemezse (indeks
+hazırlığı `Unavailable` üretir) `Elasticsearch deposu hazırlanamadı` / `Depo hazırlanamadı` loglayıp **beklemeden
+çıkış kodu 1 ile biter**. Bu yüzden Elasticsearch'ü (ve `scraperhryt setup`'ı) bu komutlardan önce başlatın;
+compose'da `depends_on` + `restart: unless-stopped` bunu sağlar (ES kısa süreliğine erişilemezse konteyner
+ES gelene dek yeniden başlatılır), compose dışında `scraperhryt check` ile ES'in hazır olduğunu doğrulayın.
 
 ---
 

@@ -7,11 +7,17 @@ uvicorn ile sunar. Depo/LLM hataları Türkçe ``detail`` alanı taşıyan HTTP 
 - bulunamadı → 404
 - Elasticsearch / LLM erişilemiyor → 503; Elasticsearch isteği reddetti / LLM bozuk çıktı → 502
 - beklenmeyen hata → 500 (ayrıntı günlükte)
+
+İki uç nokta dış bağımlılığın askıda kalmasına karşı süre bütçelidir: ``POST /reports/generate`` raporu
+``news-reports``'a yazdıktan sonra kuyruğa yayını en fazla ``REPORT_PUBLISH_TIMEOUT_SECONDS`` bekler ve yayın
+başarısızsa raporu yine ``published=false`` ile döndürür (``ReportPublisher``); ``GET /health`` LLM sondasını
+``LLM_PROBE_TIMEOUT_SECONDS`` ile sınırlar (``LLMProbe``), ``OLLAMA_TIMEOUT`` üretim için boyutlanmıştır.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -54,6 +60,13 @@ DASHBOARD_ALARMS = 20
 DASHBOARD_REPORTS = 10
 MAX_WINDOW_HOURS = 24 * 366
 MAX_SINCE_DAYS = 3660
+#: ``POST /reports/generate``: rapor yazıldıktan sonra kuyruğa yayın için en fazla beklenen süre (saniye).
+#: ``RabbitMQBroker.publish`` sunucu kapalıyken dakikalarca yeniden bağlanmayı dener; istek bunu beklemez.
+REPORT_PUBLISH_TIMEOUT_SECONDS = 10.0
+#: ``GET /health``: LLM sondası (``llm.health`` + ``llm.model_available``) için süre bütçesi (saniye). Ollama
+#: istemcisinin varsayılan zaman aşımı üretim için boyutlanmıştır (``OLLAMA_TIMEOUT``, 180 s); paketleri düşüren
+#: (reddetmeyen) bir ana makinede sağlık ucu o kadar askıda kalmamalı.
+LLM_PROBE_TIMEOUT_SECONDS = 5.0
 ReportKind = Literal["adhoc", "periodic", "daily"]
 T = TypeVar("T")
 
@@ -120,6 +133,14 @@ class GenerateReportRequest(BaseModel):
     hours: int | None = Field(default=None, ge=1, le=MAX_WINDOW_HOURS, description="Varsayılan REPORT_WINDOW_HOURS")
     window_end: datetime | None = Field(default=None, description="Pencere sonu (varsayılan: şimdi)")
     narrative: bool = Field(default=True, description="False ise LLM çağrılmaz, şablon anlatı üretilir")
+
+
+class GeneratedReport(Report):
+    """``POST /reports/generate`` yanıtı: rapor (her durumda ``news-reports``'a yazılmıştır) + yayın durumu."""
+
+    published: bool = Field(
+        default=False, description="report.generated ile kuyruğa yayınlandı mı (False: broker yok/erişilemedi)"
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -192,26 +213,126 @@ def guarded(what: str, fn: Callable[[], T]) -> T:
         raise HTTPException(status_code=500, detail=f"Beklenmeyen hata ({what}): {type(exc).__name__}") from exc
 
 
+class ReportPublisher:
+    """Raporu ``report.generated`` ile süre bütçesi içinde yayınlar; yayın başarısızlığı isteği düşürmez.
+
+    Rapor zaten ``news-reports``'a yazılmıştır, kuyruk yalnızca bildirimdir. ``RabbitMQBroker.publish`` sunucu
+    kapalıyken kilit altında dakikalarca yeniden bağlanmayı dener; bu yüzden yayın daemon iş parçacığında yapılır
+    ve ``timeout`` dolunca istek sonucu beklemeden döner. Önceki yayın hâlâ sürüyorsa (broker erişilemiyor)
+    yenisi başlatılmaz: her istek yeni bir askıda iş parçacığı biriktirmez.
+    """
+
+    def __init__(self, broker: Broker, timeout: float = REPORT_PUBLISH_TIMEOUT_SECONDS) -> None:
+        self.broker = broker
+        self.timeout = float(timeout)
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+
+    def publish(self, report: Report) -> bool:
+        """Yayın ``timeout`` içinde onaylandıysa ``True``; hata, zaman aşımı veya meşgul broker'da ``False``."""
+        outcome: dict[str, BaseException] = {}
+        abandoned = threading.Event()  # istek yayını beklemekten vazgeçti; sonuç yalnızca günlüğe yazılır
+
+        def work() -> None:
+            try:
+                self.broker.publish(RoutingKey.REPORT_GENERATED, report.to_message())
+            except Exception as exc:
+                outcome["error"] = exc
+                if abandoned.is_set():
+                    log.error("Rapor %s arka planda da kuyruğa yayınlanamadı: %s", report.report_id, exc)
+            else:
+                if abandoned.is_set():
+                    log.info("Rapor %s gecikmeli olarak kuyruğa yayınlandı", report.report_id)
+
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                log.error(
+                    "Rapor %s yazıldı ama yayınlanmadı: önceki rapor yayını hâlâ sürüyor (RabbitMQ erişilemiyor "
+                    "olabilir)",
+                    report.report_id,
+                )
+                return False
+            worker = threading.Thread(target=work, name="report-publish", daemon=True)
+            self._worker = worker
+            worker.start()
+        worker.join(self.timeout)
+        if worker.is_alive():
+            abandoned.set()
+            log.error(
+                "Rapor %s yazıldı ama %.0f sn içinde kuyruğa yayınlanamadı; yayın arka planda sürüyor",
+                report.report_id,
+                self.timeout,
+            )
+            return False
+        error = outcome.get("error")
+        if error is not None:
+            log.error("Rapor %s yazıldı ama kuyruğa yayınlanamadı: %s", report.report_id, error)
+            return False
+        log.info("İsteğe bağlı rapor yayınlandı: %s (%s)", report.report_id, report.kind)
+        return True
+
+
+class LLMProbe:
+    """``llm.health()`` + ``llm.model_available()`` sondasını süre bütçesiyle, aynı anda en fazla bir kez koşturur.
+
+    Sonda daemon iş parçacığında çalışır; ``timeout`` içinde bitmezse ``(False, False)`` döner. Sonraki
+    ``/health`` istekleri yeni sonda başlatmak yerine süren sondaya katılır; yanıt vermeyen bir Ollama ana
+    makinesi her sağlık isteğinde yeni bir askıda iş parçacığı biriktirmez.
+    """
+
+    def __init__(self, llm: LLM, timeout: float = LLM_PROBE_TIMEOUT_SECONDS) -> None:
+        self.llm = llm
+        self.timeout = float(timeout)
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._result: dict[str, tuple[bool, bool]] = {}
+
+    def _run(self, result: dict[str, tuple[bool, bool]]) -> None:
+        healthy = _safe_bool(self.llm.health, "LLM sağlık kontrolü")
+        available = healthy and _safe_bool(self.llm.model_available, "LLM model kontrolü")
+        result["value"] = (healthy, available)
+
+    def probe(self) -> tuple[bool, bool]:
+        """``(LLM erişilebilir mi, model yüklü mü)``; bütçe aşılırsa ``(False, False)``."""
+        with self._lock:
+            worker, result = self._worker, self._result
+            if worker is None or not worker.is_alive():
+                result = {}
+                worker = threading.Thread(target=self._run, args=(result,), name="llm-health-probe", daemon=True)
+                self._worker, self._result = worker, result
+                worker.start()
+        worker.join(self.timeout)
+        if worker.is_alive():
+            log.warning("LLM sağlık sondası %.0f sn içinde yanıt vermedi; LLM erişilemez sayılıyor", self.timeout)
+            return False, False
+        return result.get("value", (False, False))
+
+
 def generate_report(
     builder: ReportBuilder,
     store: ArticleStore,
-    broker: Broker | None,
+    publisher: ReportPublisher | None,
     *,
     kind: str,
     hours: int,
     window_end: datetime | None = None,
     narrative: bool = True,
-) -> Report:
-    """Raporu kurar, ``news-reports``'a yazar ve ``broker`` verilmişse ``report.generated`` ile yayınlar."""
+) -> GeneratedReport:
+    """Raporu kurar, ``news-reports``'a yazar ve ``publisher`` verilmişse ``report.generated`` ile yayınlar.
+
+    Yayın başarısızlığı (broker kapalı, zaman aşımı) raporu geçersiz kılmaz: rapor depodadır ve yanıt
+    ``published=False`` taşır. Aksi halde istemci başarılı bir isteği hata sanıp yeniden dener ve aynı rapor
+    tekrar tekrar üretilirdi.
+    """
     end = to_aware(window_end) if window_end is not None else utcnow()
     report = builder.build(kind, end - timedelta(hours=hours), end, narrative=narrative)
     store.index_report(report, refresh=True)
-    if broker is not None:
-        broker.publish(RoutingKey.REPORT_GENERATED, report.to_message())
-        log.info("İsteğe bağlı rapor yayınlandı: %s (%s)", report.report_id, kind)
-    else:
+    if publisher is None:
         log.info("İsteğe bağlı rapor yazıldı (broker yok, yayınlanmadı): %s (%s)", report.report_id, kind)
-    return report
+        published = False
+    else:
+        published = publisher.publish(report)
+    return GeneratedReport(**report.model_dump(), published=published)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -230,12 +351,16 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
     )
     builder = ReportBuilder(settings, store, llm)
     qa = QAEngine(settings, store, llm)
+    publisher = ReportPublisher(broker) if broker is not None else None
+    llm_probe = LLMProbe(llm)
     app.state.settings = settings
     app.state.store = store
     app.state.llm = llm
     app.state.broker = broker
     app.state.builder = builder
     app.state.qa = qa
+    app.state.publisher = publisher
+    app.state.llm_probe = llm_probe
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.filters["tr_dt"] = format_tr
@@ -246,8 +371,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
     @app.get("/health", response_model=HealthResponse, summary="Depo ve LLM sağlık özeti")
     def health() -> HealthResponse | JSONResponse:
         store_ok = _safe_bool(store.health, "depo sağlık kontrolü")
-        llm_ok = _safe_bool(llm.health, "LLM sağlık kontrolü")
-        model_ok = llm_ok and _safe_bool(llm.model_available, "LLM model kontrolü")
+        llm_ok, model_ok = llm_probe.probe()
         status: Literal["ok", "degraded", "unavailable"]
         if store_ok and model_ok:
             status = "ok"
@@ -328,14 +452,14 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         docs = guarded("rapor listesi", lambda: store.list_reports(kind=kind or None, size=size))
         return ReportsResponse(count=len(docs), items=[dict(doc) for doc in docs])
 
-    @app.post("/reports/generate", response_model=Report, summary="Anında rapor üret, kaydet ve yayınla")
-    def generate(payload: GenerateReportRequest) -> Report:
+    @app.post("/reports/generate", response_model=GeneratedReport, summary="Anında rapor üret, kaydet ve yayınla")
+    def generate(payload: GenerateReportRequest) -> GeneratedReport:
         return guarded(
             "rapor üretme",
             lambda: generate_report(
                 builder,
                 store,
-                broker,
+                publisher,
                 kind=payload.kind,
                 hours=payload.hours or settings.report_window_hours,
                 window_end=payload.window_end,

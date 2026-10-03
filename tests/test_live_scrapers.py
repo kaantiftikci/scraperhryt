@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import date
 
 import pytest
 
@@ -39,3 +40,14 @@ def test_live_discover_and_fetch_two_articles(client: HttpClient, source_cls: ty
             assert "Google’da Takip Edin" not in record.content
         else:
             assert "Haberlerini algoritmaya bırakma" not in record.content
+
+
+def test_live_punto_archive_search_returns_results_for_indexed_day(client: HttpClient) -> None:
+    """Site arşivi yalnızca GG/AA/YYYY tarih biçimini tanır; dizinde bulunduğu doğrulanmış bir gün (12.07.2026,
+    4 sayfa) için sonuç kapsayıcısından haber bağlantıları ve sayfa sayısı okunabilmelidir."""
+    source = PuntoSource(client.settings)
+    page = source.parse_search_page(client.get_text(source.archive_url(date(2026, 7, 12))))
+    assert page.page_count >= 2
+    assert len(page.links) >= 10
+    assert all(link.origin == "archive" and link.url.startswith("https://12punto.com.tr/") for link in page.links)
+    assert all(link.published_hint is not None and link.published_hint.date() == date(2026, 7, 12) for link in page.links)

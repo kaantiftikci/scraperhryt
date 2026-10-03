@@ -17,16 +17,20 @@ from scraperhryt.config import Settings
 from scraperhryt.models import AlarmEvent, LLMVerdict, NewsRecord, Report, Stage
 from scraperhryt.pipeline.llm import FakeOllama, HeuristicLLM, LLMBadOutput, LLMUnavailable, hashed_vector
 from scraperhryt.reporting import prompts
+from scraperhryt.reporting import service as reporting_service
 from scraperhryt.reporting.api import create_app, score_class
 from scraperhryt.reporting.builder import (
     TEMPLATE_MODEL,
     ReportBuilder,
+    alarm_stats,
     alarm_summary,
     build_template_narrative,
     report_id_for,
 )
 from scraperhryt.reporting.rag import (
+    COMBINED_QUERY_TERMS,
     FALLBACK_MODEL,
+    NO_EVIDENCE_MODEL,
     QAEngine,
     RankedDoc,
     newest_first,
@@ -184,6 +188,35 @@ def report_messages(broker: InMemoryBroker, routing_key: str) -> list[Message]:
     return [m for m in broker.published if m.routing_key == routing_key]
 
 
+class BlockingBroker(InMemoryBroker):
+    """RabbitMQ gibi davranır: kuyruk boşalınca dönmez, ``stop_event`` set edilene kadar bekler."""
+
+    def consume(
+        self,
+        queue: str,
+        handler: Any,
+        *,
+        prefetch: int | None = None,
+        stop_event: threading.Event | None = None,
+        max_messages: int | None = None,
+    ) -> int:
+        stop_event = stop_event or threading.Event()
+        processed = 0
+        while not stop_event.is_set():
+            processed += super().consume(queue, handler, prefetch=prefetch, stop_event=stop_event)
+            stop_event.wait(0.01)
+        return processed
+
+
+def wait_until(predicate: Any, timeout: float = 5.0) -> bool:
+    deadline = datetime.now(UTC) + timedelta(seconds=timeout)
+    while datetime.now(UTC) < deadline:
+        if predicate():
+            return True
+        threading.Event().wait(0.01)
+    return False
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Saf yardımcılar
 # ---------------------------------------------------------------------------------------------------------
@@ -305,8 +338,46 @@ def test_qa_engine_says_insufficient_when_nothing_matches(settings: Settings, se
     llm = FakeOllama(responder=lambda s, u: {"search_terms": ["kriptopara"], "entities": []} if s == prompts.QUERY_REWRITE_SYSTEM_PROMPT else FAKE_ANSWER)
     answer = QAEngine(settings, store, llm).ask("Kriptopara düzenlemesi ne oldu?")
     assert answer.answer.startswith(prompts.INSUFFICIENT_EVIDENCE_TEXT)
-    assert answer.sources == [] and answer.retrieved_count == 0 and answer.model == FALLBACK_MODEL
+    assert answer.sources == [] and answer.retrieved_count == 0
+    # LLM sağlıklı ve hiç çağrılmadı: "LLM kullanılamadı" (fallback) işareti yanlış olurdu.
+    assert answer.model == NO_EVIDENCE_MODEL and answer.model != FALLBACK_MODEL
     assert not [c for c in llm.calls if c[0] == "generate_text"]
+
+
+def test_search_queries_are_narrow_and_deduplicated() -> None:
+    terms = ["tartışma", "uzlaşma", "kurultay", "açıklama", "görüşme"]
+    queries = QAEngine.search_queries(QUESTION, terms, ["Özgür Özel", "Kemal Kılıçdaroğlu", "CHP"])
+    assert queries[0] == "tartışma uzlaşma kurultay açıklama"
+    assert queries[1:4] == ["Özgür Özel", "Kemal Kılıçdaroğlu", "CHP"]
+    assert queries[-1] == "özgür özel kemal kılıçdaroğlu"
+    assert all(len(q.split()) <= COMBINED_QUERY_TERMS for q in queries)
+    # Varlık yoksa terimler tek tek sorgulanır; soru sözcükleri birleşik sorguyla aynıysa tekrarlanmaz.
+    fallback = QAEngine.search_queries(QUESTION, ["özgür", "özel", "kemal", "kılıçdaroğlu"], [])
+    assert fallback == ["özgür özel kemal kılıçdaroğlu", "özgür", "özel", "kemal", "kılıçdaroğlu"]
+    # 12 terimlik yeniden yazma tek bir dev sorguya (ES'te alan başına %60 eşleşme şartı) dönüşmez.
+    many = QAEngine.search_queries("Soru", [f"terim{i}" for i in range(12)], [])
+    assert max(len(q.split()) for q in many) == COMBINED_QUERY_TERMS and many[-1] == "soru"
+    assert QAEngine.search_queries("ve ile", [], []) == ["ve ile"]
+
+
+def test_qa_engine_issues_each_search_query_to_store(settings: Settings, seeded) -> None:
+    store, records, _ = seeded
+
+    class SpyStore(InMemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[str] = []
+
+        def search_records(self, query: str, **kwargs: Any) -> list[SearchHit]:
+            self.queries.append(query)
+            return super().search_records(query, **kwargs)
+
+    spy = SpyStore()
+    spy.records.update(store.records)
+    answer = QAEngine(settings, spy, FakeOllama(responder=fake_responder)).ask(QUESTION)
+    assert spy.queries == QAEngine.search_queries(QUESTION, REWRITE["search_terms"], REWRITE["entities"])
+    assert [c.id for c in answer.sources][:3] == [records["newest"].id, records["middle"].id, records["oldest"].id]
+    assert records["sport"].id not in [c.id for c in answer.sources]
 
 
 def test_qa_engine_respects_since_days_top_k_and_sources(settings: Settings, seeded) -> None:
@@ -404,6 +475,39 @@ def test_report_builder_template_fallback_when_llm_fails(settings: Settings, see
     assert quiet.model == TEMPLATE_MODEL and quiet.stats["total"] == 0 and "haber bulunmuyor" in quiet.narrative
 
 
+def test_report_builder_top_alarms_share_the_stats_axis(settings: Settings, seeded) -> None:
+    """Haber tarihi pencere dışında, alarmı pencere içinde yükseltilmiş kayıt: istatistik saymaz, liste de saymaz."""
+    store, records, _ = seeded
+    late = make_record(
+        "eski-haber-gec-alarm",
+        "Bakan: eski fon dosyası yeniden açıldı",
+        "Fon soruşturmasına ilişkin eski bir dosya yeniden açıldı; bakan açıklama yaptı.",
+        published=days_ago(40),
+        score=90,
+        keywords=["bakan", "fon"],
+    )
+    event = AlarmEvent.from_record(late)
+    event.raised_at = days_ago(0.1)  # geç kazındı / yeniden skorlandı: alarm şimdi, haber 40 gün önce
+    late.alarm_id, late.alarmed_at = event.alarm_id, event.raised_at
+    store.index_alarm(event)
+    store.index_record(late)
+
+    report = ReportBuilder(settings, store, FakeOllama(responder=fake_responder)).build(
+        "periodic", days_ago(30), datetime.now(UTC)
+    )
+    assert report.stats["alarms"] == 2 == len(report.top_alarms)
+    assert [a["alarm_score"] for a in report.top_alarms] == [85, 72]
+    assert event.alarm_id not in {a["alarm_id"] for a in report.top_alarms}
+    assert report.stats["avg_alarm_score"] == 78.5
+
+    # Haber tarihi pencereye girince (40 gün geriye) hem sayıya hem listeye girer.
+    wide = ReportBuilder(settings, store, FakeOllama(responder=fake_responder)).build(
+        "adhoc", days_ago(45), datetime.now(UTC)
+    )
+    assert wide.stats["alarms"] == 3 == len(wide.top_alarms) and wide.top_alarms[0]["alarm_id"] == event.alarm_id
+    assert records["alarm_high"].id == wide.top_alarms[1]["record_id"]
+
+
 def test_report_builder_rejects_invalid_window(settings: Settings, seeded) -> None:
     store, _, _ = seeded
     builder = ReportBuilder(settings, store, FakeOllama(responder=fake_responder))
@@ -411,6 +515,35 @@ def test_report_builder_rejects_invalid_window(settings: Settings, seeded) -> No
         builder.build("periodic", datetime.now(UTC), days_ago(1))
     with pytest.raises(ValueError):
         builder.build("", days_ago(1), datetime.now(UTC))
+
+
+def test_alarm_digest_stats_derive_from_buffered_alarms(settings: Settings, seeded) -> None:
+    store, _, events = seeded
+
+    class NoStatsStore(InMemoryStore):
+        def stats(self, since: datetime | None, until: datetime | None = None) -> dict[str, Any]:
+            raise AssertionError("alarm özeti depo istatistiği sorgulamamalı")
+
+    llm = FakeOllama(responder=fake_responder)
+    builder = ReportBuilder(settings, NoStatsStore(), llm)
+    raised = sorted(e.raised_at for e in events)
+    docs = [e.to_es_document() for e in events]
+    report = builder.build("alarm_digest", raised[0], raised[-1], top_alarms=docs)
+
+    assert report.stats["total"] == 2 and report.stats["alarms"] == 2 and report.stats["avg_alarm_score"] == 78.5
+    assert report.stats["by_source"] == {"12punto": 1, "hurriyet": 1}
+    assert report.stats["by_keyword"] == {"fon": 2, "bakan": 1, "cumhurbaşkanı": 1}
+    assert report.stats["by_category"] == {"gundem": 2}
+    assert sum(h["count"] for h in report.stats["by_hour"]) == 2
+    assert all(h["alarms"] == h["count"] for h in report.stats["by_hour"])
+    assert report.stats == alarm_stats(report.top_alarms, raised[0], raised[-1])
+    prompt = [c for c in llm.calls if c[0] == "generate_text"][0][2]
+    assert "Özetlenen alarm sayısı: 2 | Ortalama alarm skoru: 78.5 | En yüksek skor: 85" in prompt
+    assert "Toplam haber" not in prompt
+
+    offline = builder.build("alarm_digest", raised[0], raised[-1], top_alarms=docs, narrative=False)
+    assert "Bu özet 2 alarm içerir; ortalama alarm skoru 78.5, en yüksek skor 85." in offline.narrative
+    assert "kaynaklar — 12punto: 1, hurriyet: 1" in offline.narrative or "hurriyet: 1" in offline.narrative
 
 
 def test_template_narrative_handles_empty_stats() -> None:
@@ -456,20 +589,137 @@ def test_reporting_consumer_time_based_digest_and_dedupe(settings: Settings, see
     broker = InMemoryBroker(settings)
     consumer = ReportingConsumer(settings, broker, store, ReportBuilder(settings, store, FakeOllama(responder=fake_responder)))
 
+    # Uzun bir sessizlikten sonra gelen ilk alarm tek başına özetlenmez: süre, tampondaki en eski alarmdan ölçülür.
+    consumer.last_digest_at = datetime.now(UTC) - timedelta(hours=3)
+    assert not consumer.is_digest_due()
     consumer.handle(alarm_message(events[0]))
     assert consumer.buffered == 1 and consumer.stats.digests == 0  # 1 < report_digest_every
+    assert consumer.batch_opened_at is not None and datetime.now(UTC) - consumer.batch_opened_at < timedelta(seconds=5)
+    assert not consumer.is_digest_due()
     consumer.handle(alarm_message(events[0]))  # yeniden teslim
     assert consumer.buffered == 1 and consumer.stats.duplicates == 1
 
-    consumer.last_digest_at = datetime.now(UTC) - timedelta(minutes=settings.report_digest_minutes + 1)
+    consumer.batch_opened_at = datetime.now(UTC) - timedelta(minutes=settings.report_digest_minutes + 1)
     assert consumer.is_digest_due()
     consumer.handle(alarm_message(events[1]))
     assert consumer.buffered == 0 and consumer.stats.digests == 1
     assert len(report_messages(broker, RoutingKey.REPORT_ALARM_DIGEST)) == 1
 
+    assert consumer.batch_opened_at is None
     consumer.handle(alarm_message(events[1]))  # özetlendikten sonra yeniden teslim
     assert consumer.buffered == 0 and consumer.stats.duplicates == 2
     assert consumer.flush() is None
+
+
+def test_reporting_consumer_run_emits_time_based_digest_while_idle(settings: Settings, seeded) -> None:
+    """Kuyruk sessizken süre eşiği dolunca özet, yeni alarm beklenmeden ve tüketici durmadan üretilir."""
+    store, _, events = seeded
+    broker = BlockingBroker(settings)
+    builder = ReportBuilder(settings, store, FakeOllama(responder=fake_responder))
+    consumer = ReportingConsumer(settings, broker, store, builder, poll_seconds=0.02)
+    broker.publish(RoutingKey.ALARM_RAISED, events[1].to_message())  # 47 saat önceki alarm: depodan geri alınmaz
+    stop = threading.Event()
+    thread = threading.Thread(target=consumer.run, kwargs={"stop_event": stop}, daemon=True)
+    thread.start()
+    try:
+        assert wait_until(lambda: consumer.buffered == 2)  # kuyruktaki 1 + depodan geri alınan 1 (12 saat önceki)
+        assert consumer.stats.digests == 0 and not consumer.is_digest_due()
+
+        consumer.batch_opened_at = datetime.now(UTC) - timedelta(minutes=settings.report_digest_minutes + 1)
+        assert wait_until(lambda: consumer.stats.digests == 1)
+        assert consumer.buffered == 0 and thread.is_alive()
+        published = report_messages(broker, RoutingKey.REPORT_ALARM_DIGEST)
+        assert len(published) == 1 and len(published[0].body["top_alarms"]) == 2
+
+        broker.publish(RoutingKey.ALARM_RAISED, events[1].to_message())  # özet sonrası yeniden teslim
+        assert wait_until(lambda: consumer.stats.duplicates == 1)
+        assert consumer.buffered == 0 and thread.is_alive()
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert consumer.stats.digests == 1 and len(report_messages(broker, RoutingKey.REPORT_ALARM_DIGEST)) == 1
+
+
+def test_reporting_consumer_timed_flush_failure_backs_off_and_retries(monkeypatch, seeded) -> None:
+    store, _, events = seeded
+    settings = Settings(_env_file=None, report_digest_every=10, report_digest_minutes=30)
+    monkeypatch.setattr(reporting_service, "_DIGEST_RETRY_SECONDS", 0.2)
+
+    class FailingBlockingBroker(BlockingBroker):
+        def __init__(self) -> None:
+            super().__init__(settings)
+            self.fail = True
+
+        def publish(self, routing_key: str, body: dict[str, Any], headers: dict[str, Any] | None = None) -> None:
+            if self.fail and routing_key == RoutingKey.REPORT_ALARM_DIGEST:
+                raise Retry("RabbitMQ erişilemiyor")
+            super().publish(routing_key, body, headers)
+
+    broker = FailingBlockingBroker()
+    consumer = ReportingConsumer(
+        settings, broker, store, ReportBuilder(settings, store, FakeOllama(responder=fake_responder)), poll_seconds=0.02
+    )
+    broker.publish(RoutingKey.ALARM_RAISED, events[1].to_message())
+    stop = threading.Event()
+    thread = threading.Thread(target=consumer.run, kwargs={"stop_event": stop}, daemon=True)
+    thread.start()
+    try:
+        assert wait_until(lambda: consumer.buffered == 2)
+        consumer.batch_opened_at = datetime.now(UTC) - timedelta(minutes=31)
+        assert wait_until(lambda: consumer.stats.failures == 1)
+        assert consumer.buffered == 2 and consumer.stats.digests == 0 and thread.is_alive()
+        threading.Event().wait(0.1)
+        assert consumer.stats.failures == 1  # bekleme süresi dolmadan yeniden denenmez (sıkı döngü yok)
+        broker.fail = False
+        assert wait_until(lambda: consumer.stats.digests == 1)
+        assert consumer.buffered == 0 and consumer.stats.failures == 1 and thread.is_alive()
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive() and len(report_messages(broker, RoutingKey.REPORT_ALARM_DIGEST)) == 1
+
+
+def test_reporting_consumer_recovers_undigested_alarms_on_start(settings: Settings, seeded) -> None:
+    """Çökme sonrası: depodaki özetlenmemiş yakın alarmlar tampona geri alınır; özetlenmişler yeniden özetlenmez."""
+    store, _, events = seeded
+    recent, old = events  # 12 saat önce yükseltilen / 47 saat önce yükseltilen (pencere: report_window_hours=24)
+    broker = InMemoryBroker(settings)
+    builder = ReportBuilder(settings, store, FakeOllama(responder=fake_responder))
+
+    first = ReportingConsumer(settings, broker, store, builder)
+    assert first.recover_pending() == 1
+    assert first.buffered == 1 and first.stats.recovered == 1 and first.stats.buffered == 1
+    assert first.buffer[0].alarm_id == recent.alarm_id and first.buffer[0].raised_at == recent.raised_at
+    assert first.batch_opened_at is not None and not first.is_digest_due()
+    first.handle(alarm_message(recent))  # kuyrukta bekleyen aynı alarm
+    assert first.buffered == 1 and first.stats.duplicates == 1
+    assert first.flush() is not None and first.stats.digests == 1
+
+    second = ReportingConsumer(settings, broker, store, builder)
+    assert second.recover_pending() == 0 and second.buffered == 0
+    broker.publish(RoutingKey.ALARM_RAISED, recent.to_message())  # yeniden başlatma sonrası yeniden teslim
+    broker.publish(RoutingKey.ALARM_RAISED, old.to_message())
+    assert second.run() == 2
+    assert second.stats.duplicates == 1 and second.stats.buffered == 1 and second.stats.digests == 1
+    digests = [r for r in store.reports.values() if r["kind"] == "alarm_digest"]
+    assert len(digests) == 2
+    assert [{a["alarm_id"] for a in d["top_alarms"]} for d in digests].count({old.alarm_id}) == 1
+
+
+def test_reporting_consumer_run_survives_recovery_failure(settings: Settings, seeded) -> None:
+    store, _, events = seeded
+
+    class BrokenRecovery(InMemoryStore):
+        def recent_alarms(self, since: datetime | None = None, size: int = 50) -> list[dict[str, Any]]:
+            raise Retry("Elasticsearch erişilemiyor")
+
+    broken = BrokenRecovery()
+    broker = InMemoryBroker(settings)
+    consumer = ReportingConsumer(settings, broker, broken, ReportBuilder(settings, broken, FakeOllama(responder=fake_responder)))
+    broker.publish(RoutingKey.ALARM_RAISED, events[0].to_message())
+    assert consumer.run() == 1
+    assert consumer.stats.failures == 1 and consumer.stats.recovered == 0 and consumer.stats.digests == 1
 
 
 def test_reporting_consumer_flushes_on_exit_and_rejects_invalid(settings: Settings, seeded) -> None:
@@ -582,6 +832,33 @@ def test_api_health_reports_unavailable_store(settings: Settings) -> None:
     assert res.status_code == 503 and res.json()["status"] == "unavailable" and res.json()["llm"] is False
 
 
+def test_api_health_bounds_slow_llm_probe(settings: Settings, seeded) -> None:
+    store, _, _ = seeded
+    release = threading.Event()
+    probes: list[int] = []
+
+    class BlackHoleLLM(FakeOllama):
+        """Paketleri düşüren Ollama ana makinesi: bağlantı reddedilmez, yanıt da gelmez."""
+
+        def health(self) -> bool:
+            probes.append(1)
+            release.wait(5)
+            return True
+
+    app = create_app(settings, store, BlackHoleLLM())
+    app.state.llm_probe.timeout = 0.2
+    http = TestClient(app)
+    started = datetime.now(UTC)
+    res = http.get("/health")
+    assert res.status_code == 200 and datetime.now(UTC) - started < timedelta(seconds=2)
+    body = res.json()
+    assert body["status"] == "degraded" and body["llm"] is False and body["model_available"] is False
+    # Süren sondaya katılır; her sağlık isteği yeni bir askıda iş parçacığı başlatmaz.
+    assert http.get("/health").json()["llm"] is False and len(probes) == 1
+    release.set()
+    assert wait_until(lambda: http.get("/health").json()["status"] == "ok")
+
+
 def test_api_ask_returns_citations(client) -> None:
     http, _, records = client
     res = http.post("/ask", json={"question": QUESTION, "since_days": 14, "top_k": 5})
@@ -600,6 +877,21 @@ def test_api_ask_falls_back_without_llm(settings: Settings, seeded) -> None:
     http = TestClient(create_app(settings, store, FakeOllama(available=False)))
     body = http.post("/ask", json={"question": QUESTION}).json()
     assert body["model"] == FALLBACK_MODEL and records["newest"].title in body["answer"]
+
+
+def test_api_ask_marks_no_evidence_distinct_from_llm_outage(settings: Settings, seeded) -> None:
+    store, _, _ = seeded
+
+    def responder(system: str, user: str) -> dict[str, Any] | str:
+        if system == prompts.QUERY_REWRITE_SYSTEM_PROMPT:
+            return {"search_terms": ["kriptopara"], "entities": []}
+        return FAKE_ANSWER
+
+    http = TestClient(create_app(settings, store, FakeOllama(responder=responder)))
+    body = http.post("/ask", json={"question": "Kriptopara düzenlemesi ne oldu?"}).json()
+    assert body["retrieved_count"] == 0 and body["model"] == NO_EVIDENCE_MODEL
+    assert body["answer"].startswith(prompts.INSUFFICIENT_EVIDENCE_TEXT)
+    assert http.get("/health").json()["llm"] is True
 
 
 def test_api_search_returns_alarm_docs(client) -> None:
@@ -649,12 +941,63 @@ def test_api_generate_and_list_reports(client) -> None:
     assert res.status_code == 200
     body = res.json()
     assert body["kind"] == "adhoc" and body["stats"]["total"] == 6 and body["narrative"] == FAKE_NARRATIVE
+    assert body["published"] is True
     published = report_messages(broker, RoutingKey.REPORT_GENERATED)
     assert len(published) == 1 and published[0].body["report_id"] == body["report_id"]
     listed = http.get("/reports", params={"kind": "adhoc"}).json()
     assert listed["count"] == 1 and listed["items"][0]["report_id"] == body["report_id"]
     assert http.get("/reports", params={"kind": "periodic"}).json()["count"] == 0
     assert http.post("/reports/generate", json={"kind": "bilinmeyen"}).status_code == 422
+
+
+def test_api_generate_report_returns_stored_report_when_publish_fails(settings: Settings, seeded) -> None:
+    store, _, _ = seeded
+
+    class DeadBroker(InMemoryBroker):
+        def publish(self, routing_key: str, body: dict[str, Any], headers: dict[str, Any] | None = None) -> None:
+            raise ConnectionError("Mesaj yayınlanamadı: report.generated")
+
+    http = TestClient(create_app(settings, store, FakeOllama(responder=fake_responder), broker=DeadBroker(settings)))
+    res = http.post("/reports/generate", json={"kind": "adhoc", "hours": 24 * 30})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["published"] is False and body["report_id"] in store.reports and body["narrative"] == FAKE_NARRATIVE
+    assert http.get("/reports", params={"kind": "adhoc"}).json()["count"] == 1
+    # Broker verilmemişse de rapor yazılır ve yayınlanmadığı bildirilir.
+    no_broker = TestClient(create_app(settings, store, FakeOllama(responder=fake_responder)))
+    assert no_broker.post("/reports/generate", json={"kind": "daily", "hours": 24}).json()["published"] is False
+
+
+def test_api_generate_report_does_not_wait_for_stalled_broker(settings: Settings, seeded) -> None:
+    store, _, _ = seeded
+    release = threading.Event()
+    attempts: list[str] = []
+
+    class StalledBroker(InMemoryBroker):
+        """RabbitMQ kapalı: publish yeniden bağlanma döngüsünde dakikalarca bloklanır."""
+
+        def publish(self, routing_key: str, body: dict[str, Any], headers: dict[str, Any] | None = None) -> None:
+            attempts.append(str(body["report_id"]))
+            release.wait(5)
+            super().publish(routing_key, body, headers)
+
+    broker = StalledBroker(settings)
+    app = create_app(settings, store, FakeOllama(responder=fake_responder), broker=broker)
+    app.state.publisher.timeout = 0.2
+    http = TestClient(app)
+    started = datetime.now(UTC)
+    first = http.post("/reports/generate", json={"kind": "adhoc", "hours": 24})
+    assert first.status_code == 200 and first.json()["published"] is False
+    assert datetime.now(UTC) - started < timedelta(seconds=2) and first.json()["report_id"] in store.reports
+    # Önceki yayın hâlâ askıdayken yeni istek broker'ı çağırmaz (iş parçacığı birikmez) ama raporu yine yazar.
+    second = http.post("/reports/generate", json={"kind": "daily", "hours": 24})
+    assert second.status_code == 200 and second.json()["published"] is False and len(attempts) == 1
+    assert second.json()["report_id"] in store.reports
+    release.set()
+    assert wait_until(lambda: len(report_messages(broker, RoutingKey.REPORT_GENERATED)) == 1)
+    # Broker toparlanınca yayın yeniden onaylanır.
+    third = http.post("/reports/generate", json={"kind": "adhoc", "hours": 48})
+    assert third.json()["published"] is True and len(report_messages(broker, RoutingKey.REPORT_GENERATED)) == 2
 
 
 def test_api_maps_store_errors_to_503(settings: Settings) -> None:
@@ -677,6 +1020,8 @@ def test_api_dashboard_renders_html(client) -> None:
     assert records["alarm_high"].title in html and records["alarm_high"].content_url in html
     assert "badge critical" in html and "badge important" in html
     assert "adhoc" in html or "İsteğe bağlı rapor" in html
+    # Eşleşme yokken pano "dil modeli kullanılamadı" demez; o ileti yalnızca gerçek LLM yedeğine (fallback) aittir.
+    assert "eşleşen haber bulunamadı" in html and 'answer.model === "fallback"' in html
     assert score_class(85) == "critical" and score_class(60) == "important" and score_class(30) == "notable" and score_class("x") == "routine"
 
 

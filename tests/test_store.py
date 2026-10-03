@@ -4,18 +4,22 @@
 from __future__ import annotations
 
 import itertools
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from elastic_transport import ApiResponseMeta, HttpHeaders, NodeConfig
+from elasticsearch import ApiError, BadRequestError, NotFoundError
 from elasticsearch import ConnectionError as ESConnectionError
-from elasticsearch import NotFoundError
 
-from scraperhryt.broker import Retry
+from scraperhryt.broker import Retry, Unavailable
 from scraperhryt.config import Settings
 from scraperhryt.models import AlarmEvent, LLMVerdict, NewsRecord, Report
 from scraperhryt.store import (
+    STATS_KEYWORD_BUCKETS,
+    STATS_SOURCE_BUCKETS,
+    TOP_ALARM_FIELDS,
     ElasticsearchStore,
     InMemoryStore,
     SearchHit,
@@ -228,6 +232,27 @@ def test_stats_shape_and_values() -> None:
     assert empty["by_hour"] == [] and empty["top_alarms"] == []
 
 
+def test_stats_in_memory_matches_es_shape_limits_and_omits_missing_fields() -> None:
+    store = InMemoryStore()
+    t = now()
+    for i in range(STATS_SOURCE_BUCKETS + 5):
+        store.index_record(make_record(f"K{i}", "...", published=t, source=f"kaynak-{i:02d}", keywords=[f"kw{i}"]))
+    # ES _source.includes gibi: belgede olmayan alan None olarak eklenmez
+    alarm = make_record("Eksik alanlı alarm", "...", published=t, score=90)
+    doc = alarm.to_es_document()
+    del doc["llm_summary"]
+    store.records[alarm.id] = doc
+
+    stats = store.stats(t - timedelta(hours=1), t + timedelta(hours=1))
+    assert stats["total"] == STATS_SOURCE_BUCKETS + 6
+    assert len(stats["by_source"]) == STATS_SOURCE_BUCKETS
+    assert len(stats["by_keyword"]) == STATS_SOURCE_BUCKETS + 5 <= STATS_KEYWORD_BUCKETS
+    assert stats["top_alarms"] == [{k: doc[k] for k in TOP_ALARM_FIELDS if k != "llm_summary"}]
+    assert "llm_summary" not in stats["top_alarms"][0] and None not in stats["top_alarms"][0].values()
+    # yalnızca belge içeren saatler listelenir (ES min_doc_count=1 ile aynı)
+    assert len(stats["by_hour"]) == len({_h["ts"] for _h in stats["by_hour"]}) and all(h["count"] > 0 for h in stats["by_hour"])
+
+
 def test_knn_search_in_memory() -> None:
     store = InMemoryStore()
     assert store.knn_search([1.0, 0.0], 5) == []
@@ -243,6 +268,23 @@ def test_knn_search_in_memory() -> None:
     assert hits[0].score == pytest.approx(1.0)
     assert [h.doc["id"] for h in store.knn_search([1.0, 0.0, 0.0], 5, since=t - timedelta(days=1))] == [a.id, c.id]
     assert store.knn_search([], 5) == []
+
+
+def test_knn_search_in_memory_drops_vector_when_record_reindexed_without_embedding() -> None:
+    """ES ``index`` tüm _source'u değiştirir: vektörsüz yeniden yazılan kayıt kNN'den düşer; bellek içi depo da öyle."""
+    store = InMemoryStore()
+    a = make_record("A", "eski içerik")
+    store.index_record(a, embedding=[1.0, 0.0])
+    assert [h.doc["id"] for h in store.knn_search([1.0, 0.0], 5)] == [a.id]
+
+    updated = NewsRecord.new(source=a.source, content_url=a.content_url, title="A yeni", content="güncellenmiş içerik")
+    assert updated.id == a.id and updated.content_hash != a.content_hash
+    store.index_record(updated)  # embedding üretilemedi / kapalı
+    assert store.get_record(a.id)["title"] == "A yeni"
+    assert a.id not in store.embeddings and store.knn_search([1.0, 0.0], 5) == []
+
+    store.index_record(updated, embedding=[0.0, 1.0])  # vektör yeniden verilince geri döner
+    assert [h.doc["id"] for h in store.knn_search([0.0, 1.0], 5)] == [a.id]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -322,7 +364,10 @@ def test_build_stats_aggs_shape() -> None:
     top = aggs["alarms"]["aggs"]["top_alarms"]["top_hits"]
     assert top["size"] == 10 and top["sort"][0] == {"alarm_score": {"order": "desc"}}
     assert "llm_summary" in top["_source"]["includes"]
-    assert aggs["by_hour"]["date_histogram"] == {"field": "@timestamp", "calendar_interval": "1h"}
+    # min_doc_count=1: bellek içi depo gibi yalnızca belge içeren saatler döner (boş saatler için sıfır kova yok)
+    assert aggs["by_hour"]["date_histogram"] == {"field": "@timestamp", "calendar_interval": "1h", "min_doc_count": 1}
+    assert aggs["by_source"]["terms"]["size"] == STATS_SOURCE_BUCKETS
+    assert aggs["by_keyword"]["terms"]["size"] == STATS_KEYWORD_BUCKETS
     assert aggs["by_hour"]["aggs"]["alarms"]["filter"] == {"term": {"is_alarm": True}}
 
 
@@ -341,6 +386,8 @@ class _StubIndices:
     def __init__(self, parent: _StubES) -> None:
         self.parent = parent
         self.existing: set[str] = set()
+        self.mappings: dict[str, dict[str, Any]] = {}  # indeks → properties (var olan indeksleri taklit etmek için)
+        self.put_mapping_error: Exception | None = None
 
     def exists(self, *, index: str) -> bool:
         self.parent.calls.append(("exists", {"index": index}))
@@ -355,11 +402,39 @@ class _StubIndices:
         self.parent.calls.append(("refresh", {"index": index}))
         return {}
 
+    def get_mapping(self, *, index: str) -> dict[str, Any]:
+        self.parent.calls.append(("get_mapping", {"index": index}))
+        return {index: {"mappings": {"properties": dict(self.mappings.get(index, {}))}}}
+
+    def put_mapping(self, *, index: str, properties: dict[str, Any]) -> dict[str, Any]:
+        self.parent.calls.append(("put_mapping", {"index": index, "properties": properties}))
+        if self.put_mapping_error is not None:
+            raise self.put_mapping_error
+        self.mappings.setdefault(index, {}).update(properties)
+        return {"acknowledged": True}
+
+
+def _api_error(status: int, error_type: str) -> ApiError:
+    body = {"error": {"type": error_type, "reason": error_type}, "status": status}
+    cls = BadRequestError if status == 400 else ApiError
+    return cls(message=error_type, meta=_meta(status), body=body)
+
 
 class _StubES:
-    def __init__(self, *, fail_writes: bool = False, search_response: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_writes: bool = False,
+        fail_reads: bool = False,
+        search_response: dict[str, Any] | None = None,
+        api_error: ApiError | None = None,
+        reject_embedding: bool = False,
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_writes = fail_writes
+        self.fail_reads = fail_reads
+        self.api_error = api_error  # index/get çağrıları bu ApiError'ı fırlatır (ES HTTP ile yanıt veriyor)
+        self.reject_embedding = reject_embedding  # belgede "embedding" varsa 400 mapper_parsing_exception
         self.indices = _StubIndices(self)
         self.search_response = search_response or {"hits": {"total": {"value": 0}, "hits": []}}
 
@@ -367,10 +442,18 @@ class _StubES:
         self.calls.append(("index", kwargs))
         if self.fail_writes:
             raise ESConnectionError("bağlantı reddedildi")
+        if self.api_error is not None:
+            raise self.api_error
+        if self.reject_embedding and "embedding" in kwargs.get("document", {}):
+            raise _api_error(400, "mapper_parsing_exception")
         return {"result": "created"}
 
     def get(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("get", kwargs))
+        if self.fail_reads:
+            raise ESConnectionError("bağlantı reddedildi")
+        if self.api_error is not None:
+            raise self.api_error
         raise NotFoundError("not_found", meta=_meta(404), body={"found": False})
 
     def search(self, **kwargs: Any) -> dict[str, Any]:
@@ -422,6 +505,150 @@ def test_es_writes_use_ids_and_convert_connection_errors_to_retry() -> None:
         failing.index_alarm(event)
     with pytest.raises(Retry):
         failing.index_report(report)
+
+
+def test_es_connection_errors_are_unavailable_not_plain_retry() -> None:
+    """ES kesintisi ``Unavailable`` üretir: broker TRANSIENT_MAX_ATTEMPTS tavanını uygular, 5 denemede ölü mektup olmaz."""
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    down_writes, _ = _es_store(fail_writes=True)
+    with pytest.raises(Unavailable, match="Elasticsearch erişilemiyor \\(index_record\\)"):
+        down_writes.index_record(rec)
+    with pytest.raises(Unavailable):
+        down_writes.index_alarm(AlarmEvent.from_record(rec))
+    # yeniden teslim denetimi (get_alarm/get_record) de kesintide Unavailable üretmeli; ham ConnectionError değil
+    down_reads, _ = _es_store(fail_reads=True)
+    with pytest.raises(Unavailable, match="get_record"):
+        down_reads.get_record(rec.id)
+    with pytest.raises(Unavailable, match="get_alarm"):
+        down_reads.get_alarm("x")
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [(503, "unavailable_shards_exception"), (429, "es_rejected_execution_exception"), (503, "cluster_block_exception")],
+)
+def test_es_transient_api_errors_are_unavailable(status: int, error_type: str) -> None:
+    """ES HTTP ile yanıt verip hazır değilse (429/503 ApiError, TransportError değil) yine ``Unavailable`` üretilmeli;
+    aksi halde kayıtlar ~75 s sonra ölü mektuba düşer."""
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    store, _ = _es_store(api_error=_api_error(status, error_type))
+    with pytest.raises(Unavailable, match=f"geçici olarak erişilemiyor \\(index_record, HTTP {status}\\)") as info:
+        store.index_record(rec)
+    assert error_type in str(info.value) and isinstance(info.value.__cause__, ApiError)
+    with pytest.raises(Unavailable, match="index_alarm"):
+        store.index_alarm(AlarmEvent.from_record(rec))
+    with pytest.raises(Unavailable, match="index_report"):
+        store.index_report(Report(report_id="rep-1", kind="periodic", window_start=now(), window_end=now()))
+    with pytest.raises(Unavailable, match="get_record"):
+        store.get_record(rec.id)
+    with pytest.raises(Unavailable, match="get_alarm"):
+        store.get_alarm("x")
+
+
+def test_es_permanent_api_errors_are_not_retried() -> None:
+    """400 (geçersiz istek) kalıcıdır: Retry/Unavailable'a çevrilmez, olduğu gibi yükselir; 404 get'te None'dır."""
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    store, _ = _es_store(api_error=_api_error(400, "illegal_argument_exception"))
+    with pytest.raises(BadRequestError):
+        store.index_alarm(AlarmEvent.from_record(rec))
+    assert not issubclass(BadRequestError, Retry)
+    plain, _ = _es_store()
+    assert plain.get_record(rec.id) is None
+
+
+def test_es_ensure_indices_adds_missing_embedding_mapping_to_existing_index() -> None:
+    """Model indeks oluşturulduktan sonra açıldıysa ``embedding`` eşlemesi eklenir (aksi halde dinamik float → kNN 400)."""
+    store, stub = _es_store()  # embedding_dims=3
+    stub.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
+    stub.indices.mappings["news-articles"] = {"title": {"type": "text"}}
+    store.ensure_indices()
+    assert stub.of("create") == [] and stub.of("get_mapping") == [{"index": "news-articles"}]
+    put = stub.of("put_mapping")
+    assert len(put) == 1 and put[0]["index"] == "news-articles"
+    assert put[0]["properties"]["embedding"] == {"type": "dense_vector", "dims": 3, "index": True, "similarity": "cosine"}
+    assert store.embeddings_enabled is True
+    # eşleme artık uyumlu: ikinci çağrı bir şey değiştirmez
+    store.ensure_indices()
+    assert len(stub.of("put_mapping")) == 1 and len(stub.of("get_mapping")) == 2
+
+
+def test_es_ensure_indices_disables_embeddings_on_mapping_mismatch(caplog: pytest.LogCaptureFixture) -> None:
+    """EMBEDDING_DIMS değişti ama indeks yeniden oluşturulmadı: vektör indeksleme kapatılır, kayıtlar vektörsüz yazılır."""
+    store, stub = _es_store()  # ayarlar dims=3
+    stub.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
+    stub.indices.mappings["news-articles"] = {
+        "embedding": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "cosine"}
+    }
+    with caplog.at_level(logging.ERROR, logger="scraperhryt.store"):
+        store.ensure_indices()
+    assert stub.of("put_mapping") == [] and store.embeddings_enabled is False
+    assert any("768" in r.getMessage() and "dims=3" in r.getMessage() and "KAPATILDI" in r.getMessage() for r in caplog.records)
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    store.index_record(rec, embedding=[0.1, 0.2, 0.3])
+    assert "embedding" not in stub.of("index")[0]["document"]
+    assert store.knn_search([0.1, 0.2, 0.3], 5) == [] and stub.of("search") == []
+    # kapatıldıktan sonra ensure_indices eşlemeyi yeniden sorgulamaz
+    store.ensure_indices()
+    assert len(stub.of("get_mapping")) == 1
+
+
+def test_es_ensure_indices_disables_embeddings_when_field_is_dynamically_mapped() -> None:
+    """``embedding`` alanı dense_vector değil (dinamik float eşleme): put_mapping denenmez, vektörler kapatılır."""
+    store, stub = _es_store()
+    stub.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
+    stub.indices.mappings["news-articles"] = {"embedding": {"type": "float"}}
+    store.ensure_indices()
+    assert stub.of("put_mapping") == [] and store.embeddings_enabled is False
+
+    failing, stub2 = _es_store()
+    stub2.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
+    stub2.indices.put_mapping_error = _api_error(400, "illegal_argument_exception")
+    failing.ensure_indices()
+    assert len(stub2.of("put_mapping")) == 1 and failing.embeddings_enabled is False
+
+
+def test_es_ensure_indices_skips_mapping_reconciliation_without_embedding_model() -> None:
+    stub = _StubES()
+    stub.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
+    store = ElasticsearchStore(Settings(_env_file=None, ollama_embedding_model=""), client=stub)  # type: ignore[arg-type]
+    store.ensure_indices()
+    assert stub.of("get_mapping") == [] and stub.of("put_mapping") == []
+    # yeni oluşturulan indeksin eşlemesi zaten ayarlardan gelir: uzlaştırma gerekmez
+    fresh, stub_fresh = _es_store()
+    fresh.ensure_indices()
+    assert len(stub_fresh.of("create")) == 3 and stub_fresh.of("get_mapping") == []
+
+
+def test_es_index_record_retries_without_vector_when_mapping_rejects_it(caplog: pytest.LogCaptureFixture) -> None:
+    """Son savunma hattı: canlı eşleme vektörü 400 mapper_parsing ile reddederse belge vektörsüz yazılır, kaybolmaz."""
+    store, stub = _es_store(reject_embedding=True)
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    with caplog.at_level(logging.ERROR, logger="scraperhryt.store"):
+        store.index_record(rec, embedding=[0.1, 0.2, 0.3], refresh=True)
+    calls = stub.of("index")
+    assert len(calls) == 2 and "embedding" in calls[0]["document"] and "embedding" not in calls[1]["document"]
+    assert calls[1]["id"] == rec.id and calls[1]["refresh"] is True
+    assert store.embeddings_enabled is False
+    assert any("mapper_parsing_exception" in r.getMessage() and "KAPATILDI" in r.getMessage() for r in caplog.records)
+    # vektörsüz belgeyi reddeden 400 ise (eşlemeyle ilgisiz) yeniden denenmez, olduğu gibi yükselir
+    broken, stub2 = _es_store(api_error=_api_error(400, "mapper_parsing_exception"))
+    with pytest.raises(BadRequestError):
+        broken.index_record(rec)
+    assert len(stub2.of("index")) == 1
+
+
+def test_es_embedding_with_wrong_dims_is_dropped_and_record_still_written(caplog: pytest.LogCaptureFixture) -> None:
+    """Model EMBEDDING_DIMS'ten farklı boyut üretirse vektör atılır; belge yine yazılır (ES 400 ile kayıt kaybı yok)."""
+    store, stub = _es_store()  # embedding_dims=3
+    rec = make_record("Bakan açıklama yaptı", "...", score=80)
+    with caplog.at_level(logging.ERROR, logger="scraperhryt.store"):
+        store.index_record(rec, embedding=[0.1] * 1024)
+    call = stub.of("index")[0]
+    assert call["id"] == rec.id and "embedding" not in call["document"]
+    assert any("1024" in r.getMessage() and "EMBEDDING_DIMS" in r.getMessage() for r in caplog.records)
+    # doğru boyut olduğu gibi yazılır
+    store.index_record(rec, embedding=[0.1, 0.2, 0.3])
+    assert stub.of("index")[1]["document"]["embedding"] == [0.1, 0.2, 0.3]
 
 
 def test_es_embedding_dropped_when_embeddings_disabled() -> None:
