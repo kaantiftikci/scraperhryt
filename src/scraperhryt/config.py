@@ -61,6 +61,22 @@ class Settings(BaseSettings):
     keywords: str = "bakan,cumhurbaşkanı,fon"
     alarm_threshold: int = Field(default=60, ge=0, le=100)
     llm_score_all: bool = False  # True ise anahtar kelime içermeyen haberler de LLM'e gönderilir
+    keyword_aliases_path: str = "config/keyword_aliases.json"  # kanonik anahtar kelime → eş anlamlı/varlık listesi
+    # Kaynak/kategori bazlı eşikler, JSON: {"source:12punto": 70, "category:Spor": 90}; yoksa alarm_threshold
+    alarm_thresholds_json: str = ""
+
+    # ---- Ön sınıflandırıcı (embedding tabanlı ilgililik filtresi; LLM'den önce yanlış pozitifleri eler) ----
+    preclassifier_enabled: bool = False
+    preclassifier_threshold: float = 0.35  # relevance (ilgili-merkez benzerliği - ilgisiz-merkez benzerliği) alt sınırı
+    preclassifier_prototypes_path: str = "config/preclassifier_prototypes.json"
+
+    # ---- LLM skorlama kalitesi ----
+    llm_samples: int = 1  # >1 ise aynı haber N kez skorlanır, medyan alınır (öz-tutarlılık)
+    llm_sample_temperature: float = 0.4  # çoklu örneklemede kullanılan sıcaklık
+    llm_disagreement_threshold: int = 25  # örnekler arası skor farkı bunu aşarsa needs_review=True
+    llm_fewshot_examples: int = 0  # prompta altın setten eklenecek örnek sayısı
+    golden_set_path: str = "config/golden_set.jsonl"  # etiketli kalibrasyon örnekleri
+    rescore_batch_size: int = 50
 
     # ---- Scraper ----
     sources: str = "hurriyet,12punto"
@@ -76,6 +92,8 @@ class Settings(BaseSettings):
     punto_base_url: str = "https://12punto.com.tr"
     # 12punto'nun /rss/<kategori> beslemesi ve /<kategori> listesi olan tüm bölümler. Karışık /rss yalnızca son
     # 20 haberi verdiğinden listede olmayan bir bölüm, tarama aralığı uzadığında sessizce kaçar.
+    hurriyet_deep_pages: int = 0  # >0 ise Playwright ile Hürriyet gündem listesinde JS sayfalama/"daha fazla" ile bu kadar sayfa derin taranır
+    deep_crawl_timeout: float = 60.0
     punto_categories: str = (
         "gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,"
         "yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,"
@@ -87,6 +105,12 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     alarm_log_path: str = "data/alarms.jsonl"
+    # Olay kümeleme / tekrar alarm bastırma
+    alarm_dedup_enabled: bool = True
+    alarm_dedup_window_hours: int = 24
+    alarm_dedup_similarity: float = 0.82  # embedding kosinüs benzerliği eşiği
+    alarm_dedup_title_jaccard: float = 0.6  # embedding yoksa başlık kelime Jaccard eşiği
+    alarm_notify_duplicates: bool = False  # tekrar (duplicate_of dolu) alarmlar bildirim kanallarına gitmesin
 
     # ---- Raporlama / API ----
     api_host: str = "0.0.0.0"
@@ -97,6 +121,14 @@ class Settings(BaseSettings):
     report_digest_minutes: int = 30    # ... veya en son özetten bu kadar dakika geçince
     rag_top_k: int = 12
     rag_recency_days: int = 14
+    rag_hybrid: bool = True  # embedding modeli ayarlıysa BM25 + kNN (RRF) birleşik arama
+    rag_eval_path: str = "config/rag_eval.jsonl"
+    # Ani artış (burst) tespiti: aynı konu/varlık için pencere içinde en az N alarm → burst raporu
+    burst_window_minutes: int = 60
+    burst_min_articles: int = 5
+    # Prometheus metrikleri
+    metrics_enabled: bool = True
+    metrics_port: int = 9108
 
     # ---- Türetilmiş yardımcılar ----
     @property

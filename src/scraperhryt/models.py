@@ -77,6 +77,8 @@ class LLMVerdict(BaseModel):
     summary: str = ""
     topics: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
+    confidence: int = Field(default=0, ge=0, le=100)  # modelin/öz-tutarlılığın güven derecesi
+    samples: list[int] = Field(default_factory=list)  # çoklu örneklemede alınan tekil skorlar
     scored_at: datetime = Field(default_factory=utcnow)
     latency_ms: int = 0
     attempts: int = 1
@@ -114,6 +116,15 @@ class NewsRecord(BaseModel):
     alarm_id: str = ""
     alarmed_at: datetime | None = None
     processed_at: datetime | None = None
+    # --- doğruluk geliştirmeleri ---
+    relevance: float | None = None  # ön sınıflandırıcı ilgililik skoru (embedding tabanlı); None = çalışmadı
+    prefilter_reason: str = ""  # ön sınıflandırıcı/eleme gerekçesi (boş = elenmedi)
+    confidence: int = Field(default=0, ge=0, le=100)  # alarm skoruna duyulan güven (öz-tutarlılık)
+    needs_review: bool = False  # örnekler arası uyuşmazlık yüksek → insan incelemesi önerilir
+    score_samples: list[int] = Field(default_factory=list)
+    alarm_threshold_used: int = 0  # bu kayıt için uygulanan (kaynak/kategori bazlı) eşik
+    event_id: str = ""  # olay kümesi kimliği (benzer alarmlar aynı event_id'yi paylaşır)
+    duplicate_of: str = ""  # aynı olayın daha önceki alarm_id'si (tekrar alarm bastırma)
 
     @field_validator("content_url")
     @classmethod
@@ -161,6 +172,9 @@ class NewsRecord(BaseModel):
         """
         self.llm = verdict
         self.alarm_score = int(verdict.alarm_score)
+        self.alarm_threshold_used = int(threshold)
+        self.confidence = int(verdict.confidence)
+        self.score_samples = list(verdict.samples)
         self.is_alarm = self.alarm_score >= int(threshold)
         if self.is_alarm:
             self.llm_summary = (verdict.summary or "").strip()
@@ -269,6 +283,34 @@ class Report(BaseModel):
         return doc
 
 
+class Feedback(BaseModel):
+    """Bir alarm için insan geri bildirimi (news-feedback indeksi); kalibrasyon ve raporlarda kullanılır."""
+
+    feedback_id: str
+    alarm_id: str
+    record_id: str = ""
+    label: str  # "true_positive" | "false_positive" | "needs_context"
+    note: str = ""
+    user: str = ""
+    channel: str = "api"  # "api" | "cli" | "dashboard"
+    created_at: datetime = Field(default_factory=utcnow)
+
+    def to_es_document(self) -> dict[str, Any]:
+        doc = self.model_dump(mode="json")
+        doc["@timestamp"] = self.created_at.isoformat()
+        return doc
+
+
+class TimelineItem(BaseModel):
+    """RAG cevabındaki zaman çizelgesi adımı."""
+
+    date: datetime | None = None
+    event: str
+    source: str = ""
+    content_url: str = ""
+    citation: int | None = None  # ilgili kaynak numarası [n]
+
+
 class Citation(BaseModel):
     id: str
     title: str
@@ -289,3 +331,5 @@ class Answer(BaseModel):
     retrieved_count: int = 0
     generated_at: datetime = Field(default_factory=utcnow)
     search_terms: list[str] = Field(default_factory=list)
+    timeline: list[TimelineItem] = Field(default_factory=list)  # olayların kronolojik sırası (eski → yeni)
+    contradictions: list[str] = Field(default_factory=list)  # kaynaklar arası çelişkiler
