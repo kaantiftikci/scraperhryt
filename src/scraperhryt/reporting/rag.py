@@ -29,7 +29,7 @@ from ..config import Settings
 from ..models import Answer, Citation, TimelineItem, utcnow
 from ..pipeline.llm import LLM, HeuristicLLM, LLMError
 from ..store import ArticleStore, SearchHit
-from ..textutil import excerpt, normalize_ws, tr_lower
+from ..textutil import KeywordMatcher, excerpt, normalize_ws, tr_lower
 from .prompts import (
     CONTEXT_CONTENT_CHARS,
     INSUFFICIENT_EVIDENCE_TEXT,
@@ -183,7 +183,11 @@ class QAEngine:
         terms, entities = self.rewrite_query(question)
         search_terms = _dedupe(terms + entities)[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
-        ordered = newest_first(self.retrieve(question, queries, since=since, size=size, sources=source_filter))
+        ranked = self.retrieve(question, queries, since=since, size=size, sources=source_filter)
+        relevant = filter_relevant(ranked, terms=terms, entities=entities)
+        if len(relevant) < len(ranked):
+            log.info("İlgisiz %d belge elendi (soru terimleri metinde geçmiyor)", len(ranked) - len(relevant))
+        ordered = newest_first(relevant)
         blocks, citations = self.build_context(ordered)
         log.info(
             "Soru işlendi: %r → terimler=%s, bulunan=%d, pencere=%s gün",
@@ -343,7 +347,7 @@ class QAEngine:
             text = normalize_ws(self.llm.generate_text(RAG_SYSTEM_PROMPT, user))
         except LLMError as exc:
             log.warning("LLM yanıt üretemedi; haberlerden çıkarımsal yedek yanıt derlenecek: %s", exc)
-            return extractive_answer(ordered, citations), FALLBACK_MODEL
+            return extractive_answer(ordered, citations, reason=str(exc)), FALLBACK_MODEL
         if not text:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return extractive_answer(ordered, citations), FALLBACK_MODEL
@@ -372,9 +376,47 @@ def newest_first(ranked: Sequence[RankedDoc]) -> list[RankedDoc]:
     return sorted(ranked, key=_newest_first_key)
 
 
-def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation]) -> str:
+_QUESTION_STOPWORDS = frozenset(
+    "ile ve veya ama için gibi kadar göre son durum durumu nedir ne neler nasıl niye neden hangi kim kimdir "
+    "mi mı mu mü midir mıdır var yok oldu olan olarak arasında arasındaki hakkında ilgili üzerine şu bu o "
+    "haber haberler haberleri gelişme gelişmeler açıklama bugün dün".split()
+)
+
+
+def key_terms(terms: Sequence[str], entities: Sequence[str]) -> list[str]:
+    """Soru terimlerinden ilgililik filtresi için anlamlı kökler (kısa/işlevsel kelimeler atılır)."""
+    out: list[str] = []
+    for phrase in list(entities) + list(terms):
+        for word in tr_lower(phrase).replace("'", " ").split():
+            if len(word) >= 4 and word not in _QUESTION_STOPWORDS and word not in out:
+                out.append(word)
+    return out
+
+
+def filter_relevant(ranked: Sequence[RankedDoc], *, terms: Sequence[str], entities: Sequence[str]) -> list[RankedDoc]:
+    """Soru terimlerinden hiçbiri başlık/alt başlık/içerikte geçmeyen belgeleri eler (Türkçe ek toleranslı).
+
+    Özel adlar (``entities``) varsa en az bir özel ad eşleşmesi aranır; yoksa herhangi bir anlamlı terim yeter.
+    Terim çıkarılamazsa sıralama olduğu gibi döner.
+    """
+    entity_terms = key_terms([], entities)
+    all_terms = key_terms(terms, entities)
+    if not all_terms:
+        return list(ranked)
+    matcher = KeywordMatcher(entity_terms or all_terms)
+    kept: list[RankedDoc] = []
+    for item in ranked:
+        doc = item.doc
+        text = " ".join(flat_text(doc.get(k)) for k in ("title", "subtitle", "content", "llm_summary"))
+        if matcher.matches(text):
+            kept.append(item)
+    return kept
+
+
+def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation], *, reason: str = "") -> str:
     """LLM'siz yedek yanıt: en yeni ``FALLBACK_HEADLINES`` başlık + tarih, ardından en yeni haberin özeti (atıflı)."""
-    lines = ["Dil modeline erişilemediği için yanıt haberlerden doğrudan derlendi (en yeniden en eskiye):"]
+    why = f" ({excerpt(reason, 120)})" if reason else ""
+    lines = [f"Dil modeline erişilemediği için{why} yanıt haberlerden doğrudan derlendi (en yeniden en eskiye):"]
     for index, citation in enumerate(list(citations)[:FALLBACK_HEADLINES], 1):
         source = f" ({citation.source})" if citation.source else ""
         lines.append(f"- {format_tr(citation.published_at)} — {citation.title}{source} [{index}]")

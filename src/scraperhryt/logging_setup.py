@@ -25,6 +25,13 @@ NOISY_LOGGERS = (
     "uvicorn.access",
 )
 
+#: Bağlantı kopmalarında kendi ERROR+traceback'ini basan pika iç günlükçüleri; broker katmanı zaten uyarı verir.
+SILENT_LOGGERS = (
+    "pika.adapters.utils.io_services_utils",
+    "pika.adapters.base_connection",
+    "pika.adapters.blocking_connection",
+)
+
 _HANDLER_MARK = "_scraperhryt_handler"
 
 
@@ -56,3 +63,5 @@ def configure(level: str | int = "INFO", *, stream: TextIO | None = None) -> Non
     root.setLevel(resolved)
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(max(resolved, logging.WARNING))
+    for name in SILENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.CRITICAL)

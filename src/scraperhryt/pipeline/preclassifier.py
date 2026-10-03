@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import Settings
-from ..textutil import KeywordHit, tr_lower
+from ..textutil import KeywordHit, KeywordMatcher, tr_lower
 
 log = logging.getLogger(__name__)
 
@@ -170,10 +170,13 @@ class Preclassifier:
         return round(_cosine(vec, rel) - _cosine(vec, irr), 4)
 
     # --- karar ---
-    def evaluate(self, text: str, hits: Sequence[KeywordHit]) -> PrefilterDecision:
+    def evaluate(self, text: str, hits: Sequence[KeywordHit], *, title: str = "") -> PrefilterDecision:
         reason = rule_based_reason(text, hits)
         if reason:
             return PrefilterDecision(drop=True, reason=reason, method="rule")
+        if title and KeywordMatcher([h.keyword for h in hits]).matches(title):
+            # Anahtar kelime başlıkta geçiyorsa haber konuyla doğrudan ilgilidir; embedding katmanı eleyemez.
+            return PrefilterDecision(drop=False, method="title")
         rel = self.relevance(text)
         if rel is None:
             return PrefilterDecision(drop=False)

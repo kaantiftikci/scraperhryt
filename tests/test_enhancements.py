@@ -306,7 +306,7 @@ def test_filter_prefilters_and_stores_without_llm() -> None:
     dropped = NewsRecord.from_message(broker.drain(Queue.ARTICLES_SCORED)[0].body)
     kept = NewsRecord.from_message(broker.drain(Queue.ARTICLES_KEYWORD)[0].body)
     assert dropped.prefilter_reason.startswith("kural:") and dropped.alarm_score == 0 and dropped.matched_keywords == ["bakan"]
-    assert kept.id == real.id and kept.prefilter_reason == "" and kept.relevance is not None
+    assert kept.id == real.id and kept.prefilter_reason == ""  # başlıkta anahtar kelime: embedding katmanı atlanır
     assert svc.stats.prefiltered == 1 and svc.stats.hits == 1
 
 

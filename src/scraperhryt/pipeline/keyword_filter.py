@@ -117,7 +117,7 @@ class KeywordFilterService:
         hits = self.classify(record)
         title = excerpt(record.title, 80)
         if hits and self.preclassifier is not None:
-            decision = self.preclassifier.evaluate(record.text_for_matching(), hits)
+            decision = self.preclassifier.evaluate(record.text_for_matching(), hits, title=record.title)
             record.relevance = decision.relevance
             if decision.drop:
                 record.matched_keywords = [h.keyword for h in hits]

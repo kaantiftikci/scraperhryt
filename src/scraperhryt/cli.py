@@ -1236,7 +1236,8 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
             for name, broker, queue, handler, prefetch in workers:
                 supervisor.spawn(name, functools.partial(consume_worker, broker, queue, handler, prefetch))
             supervisor.spawn("reporter", reporter_worker)
-            supervisor.spawn("periodic", periodic_worker)
+            if not args.once:
+                supervisor.spawn("periodic", periodic_worker)  # tek turda periyodik rapor kuyruklar boşalınca üretilir
             if serve_api:
                 from .reporting.api import create_app
 
@@ -1268,6 +1269,12 @@ def cmd_run_all(args: argparse.Namespace, settings: Settings) -> int:
                     stop.wait(IDLE_POLL_SECONDS)
                 # Özet, rapor tüketicisinin çıkışta tamponu boşaltmasını (alarm özeti) da kapsasın.
                 supervisor.join(shutdown_timeout_for(settings, llm))
+                main_brokers.append(periodic_broker)  # tek turda periyodik rapor ana iş parçacığında üretilir
+                try:
+                    print(describe_report(periodic.run_once()))
+                    print()
+                except Exception as exc:
+                    log.error("Periyodik rapor üretilemedi: %s", describe_exc(exc))
                 print_run_summary(
                     title="run-all özeti (tek tur)",
                     scrape_summary=stats.summary(),
