@@ -356,3 +356,26 @@ def test_model_refusal_with_relevant_docs_falls_back_to_extractive() -> None:
     engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
     answer = engine.ask("Fon soruşturmasında son durum ne?")
     assert answer.model == "fallback" and "Fon soruşturmasında 20 şüpheli" in answer.answer and answer.sources
+
+
+def test_extractive_answer_is_short_prose_not_headline_list() -> None:
+    s = settings(rag_recency_days=30)
+    store = InMemoryStore()
+    a = make_record("Fon soruşturmasında 20 şüpheli tutuklandı", "Savcılık toplam tutuklu sayısının 85'e çıktığını açıkladı. Dosya genişliyor.", keywords=["fon"], days_ago=1)
+    b = make_record("Fon soruşturmasında avukat çift mercek altında", "Avukat çiftin hisse satışından 2,5 milyar TL kazanç elde ettiği belirlendi. Soruşturma sürüyor.", keywords=["fon"], days_ago=0)
+    store.index_record(a)
+    store.index_record(b)
+    engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
+    answer = engine.ask("Fon soruşturmasında son durum ne?")
+    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer and "Daha önce" in answer.answer
+    assert "\n- " not in answer.answer and answer.answer.count(".") <= 5 and "2,5 milyar" in answer.answer
+
+
+def test_cli_format_answer_hides_sources_by_default() -> None:
+    from scraperhryt.cli import format_answer
+    from scraperhryt.models import Answer, Citation
+
+    ans = Answer(question="q", answer="Özet cümle. [1]", sources=[Citation(id="1", title="Başlık", content_url="https://x/1", source="hurriyet")], model="m", retrieved_count=1)
+    short = format_answer(ans)
+    assert "Özet cümle" in short and "https://x/1" not in short and "--sources" in short
+    assert "https://x/1" in format_answer(ans, show_sources=True)

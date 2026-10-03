@@ -82,6 +82,8 @@
     ol.timeline { margin: 0; padding-left: 20px; display: grid; gap: 4px; } .tdate { font: 12px var(--font-data); color: var(--muted); margin-right: 6px; }
     ol.sources { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
     .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+    details.item summary { cursor: pointer; color: var(--accent); }
+    details.item[open] summary { margin-bottom: 8px; }
     h2.small { font: 500 13px var(--font-body); text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0; }
     @media (prefers-reduced-motion: no-preference) { button.primary, .fb button { transition: filter .15s; } button.primary:hover { filter: brightness(1.08); } }
     @media (max-width: 480px) { header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; } }
@@ -247,8 +249,9 @@
       const timeline = (a.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${t.citation}] ` : ""}${esc(t.event)}</li>`).join("");
       const sources = (a.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${esc(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
       $("ask-result").innerHTML = `<article class="item"><p class="answer">${esc(a.answer)}</p></article>` +
-        (timeline ? `<article class="item"><h2 class="small">Zaman çizelgesi · eski → yeni</h2><ol class="timeline">${timeline}</ol></article>` : "") +
-        (sources ? `<article class="item"><h2 class="small">Kaynaklar</h2><ol class="sources">${sources}</ol></article>` : "");
+        (sources ? `<details class="item"><summary class="small">Kaynaklar ve zaman çizelgesi (${(a.sources || []).length})</summary>` +
+          (timeline ? `<h2 class="small">Zaman çizelgesi · eski → yeni</h2><ol class="timeline">${timeline}</ol>` : "") +
+          `<h2 class="small">Kaynaklar</h2><ol class="sources">${sources}</ol></details>` : "");
     } catch (e) { $("ask-note").textContent = "Soru yanıtlanamadı: " + e.message; }
     finally { $("ask-btn").disabled = false; }
   }

@@ -545,7 +545,7 @@ def start_api_server(app: Any, settings: Settings, supervisor: Supervisor) -> An
 # ---------------------------------------------------------------------------------------------------------
 
 
-def format_answer(answer: Answer) -> str:
+def format_answer(answer: Answer, *, show_sources: bool = False) -> str:
     lines = [
         f"Soru: {answer.question}",
         f"Model: {answer.model or '-'} | bulunan haber: {answer.retrieved_count} | "
@@ -553,6 +553,10 @@ def format_answer(answer: Answer) -> str:
         "",
         answer.answer.strip() or "(cevap üretilemedi)",
     ]
+    if not show_sources:
+        if answer.sources:
+            lines.extend(["", f"({len(answer.sources)} haber kaynak alındı; kaynakları görmek için --sources)"])
+        return "\n".join(lines)
     if answer.timeline:
         lines.extend(["", "Zaman çizelgesi (eski → yeni):"])
         for item in answer.timeline:
@@ -908,7 +912,7 @@ def cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
     if args.json:
         print(answer.model_dump_json(indent=2))
     else:
-        print(format_answer(answer))
+        print(format_answer(answer, show_sources=bool(getattr(args, "sources", False))))
     return 0
 
 
@@ -1425,6 +1429,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since-days", type=int, default=None, metavar="N", help="yalnızca son N günün haberleri")
     p.add_argument("--top-k", type=int, default=None, metavar="N", help="bağlama alınacak en fazla haber sayısı")
     p.add_argument("--json", action="store_true", help="yanıtı JSON olarak yazdır")
+    p.add_argument("--sources", action="store_true", help="özetin altında kaynakları ve zaman çizelgesini de yazdır")
     _add_fake_llm(p)
     p.set_defaults(func=cmd_ask)
 

@@ -272,6 +272,8 @@ RAG_SYSTEM_PROMPT = (
     "olandır; listede [1] olmak zorunda değildir.\n"
     "- Haber başlıkları sorudaki konuyu içeriyorsa 'yeterli bilgi yok' DEME; o haberlerdeki somut gelişmeleri "
     "(kim, ne, ne zaman, sayılar) en yeniden başlayarak özetle.\n"
+    "- Yanıt 2-4 cümlelik akıcı bir ÖZET olsun: haber başlıklarını listeleme, madde işareti kullanma, "
+    "haberleri tek tek anlatma; gelişmeleri birleştirip tek paragrafta ver.\n"
     "- Her iddianın sonuna dayandığı haberin numarasını köşeli parantezle ekle: [1], [2] gibi; birden fazla "
     "habere dayanıyorsa [1][3].\n"
     "- Haberlerde olmayan bilgi ekleme, tahmin yürütme, genel bilgine başvurma; haberler arasındaki "
@@ -293,12 +295,14 @@ def build_context_block(
     subtitle = flat_text(doc.get("subtitle"))
     if subtitle and subtitle != title:
         parts.append(subtitle)
+    summary = flat_text(doc.get("llm_summary"))
+    if summary and summary != subtitle:
+        parts.append(f"Özet: {excerpt(summary, 400)}")
     content = flat_text(doc.get("content"))
     if content:
-        parts.append(excerpt(content, max(80, int(max_content_chars))))
-    summary = flat_text(doc.get("llm_summary"))
-    if summary:
-        parts.append(f"LLM özeti: {excerpt(summary, 400)}")
+        # Özet varsa içerik kısa tutulur: küçük modeller uzun bağlamda sentez yapamıyor.
+        budget = min(int(max_content_chars), 500) if summary else int(max_content_chars)
+        parts.append(excerpt(content, max(80, budget)))
     return f"[{index}] ({source}, {date}) " + " — ".join(parts)
 
 
@@ -320,7 +324,8 @@ def build_rag_user_prompt(
         "\n"
         f"{body}\n"
         "\n"
-        "Yukarıdaki haberlere dayanarak, kurallara uygun biçimde Türkçe yanıt ver."
+        "Yukarıdaki haberlere dayanarak soruyu 2-4 cümlelik tek paragraflık Türkçe bir özetle yanıtla; "
+        "en güncel gelişme ve tarihiyle başla, haberleri listeleme, her cümlenin sonuna kaynak numarasını ekle."
     )
 
 

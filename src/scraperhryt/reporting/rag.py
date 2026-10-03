@@ -432,22 +432,47 @@ def _is_refusal(text: str) -> bool:
     return len(low) < 220 and ("yeterli bilgi yok" in low or "bilgi bulunmuyor" in low or "bilgi bulunmamaktadır" in low)
 
 
-def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation], *, reason: str = "") -> str:
-    """LLM'siz yedek yanıt: en yeni ``FALLBACK_HEADLINES`` başlık + tarih, ardından en yeni haberin özeti (atıflı)."""
-    why = f" ({excerpt(reason, 120)})" if reason else ""
-    lines = [f"Yanıt haberlerden doğrudan derlendi{why}; en yeniden en eskiye:"]
-    for index, citation in enumerate(list(citations)[:FALLBACK_HEADLINES], 1):
-        source = f" ({citation.source})" if citation.source else ""
-        lines.append(f"- {format_tr(citation.published_at)} — {citation.title}{source} [{index}]")
-    if ordered:
-        newest = ordered[0].doc
-        detail = flat_text(newest.get("llm_summary")) or flat_text(newest.get("subtitle")) or flat_text(
-            newest.get("content")
-        )
-        if detail:
-            lines.append(f"Son gelişme ({format_tr(doc_timestamp(newest))}): {excerpt(detail, 300)} [1]")
-    return "\n".join(lines)
+def _first_sentence(text: str, limit: int = 220) -> str:
+    text = flat_text(text)
+    if not text:
+        return ""
+    match = re.search(r"^(.+?[.!?])(\s|$)", text)
+    sentence = match.group(1) if match else text
+    return excerpt(sentence, limit).rstrip(".…") 
 
+
+def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation], *, reason: str = "") -> str:
+    """LLM'siz yedek yanıt: en yeni ilgili haberlerden 2-3 cümlelik düz özet (başlık listesi değil, atıflı)."""
+    items = list(ordered)[:FALLBACK_HEADLINES]
+    if not items:
+        return INSUFFICIENT_EVIDENCE_TEXT
+    sentences: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items, 1):
+        doc = item.doc
+        detail = (
+            _first_sentence(doc.get("llm_summary"))
+            or _first_sentence(doc.get("subtitle"))
+            or _first_sentence(doc.get("content"))
+            or _first_sentence(doc.get("title"))
+        )
+        key = tr_lower(detail)[:80]
+        if not detail or key in seen:
+            continue
+        seen.add(key)
+        stamp = format_tr(doc_timestamp(doc))
+        if not sentences:
+            sentences.append(f"Son gelişme ({stamp}): {detail} [{index}].")
+        elif len(sentences) == 1:
+            sentences.append(f"Daha önce {detail[0].lower() + detail[1:]} [{index}].")
+        else:
+            sentences.append(f"Ayrıca {detail[0].lower() + detail[1:]} [{index}].")
+        if len(sentences) >= 3:
+            break
+    text = " ".join(sentences)
+    if reason:
+        text += f" (Bu özet haberlerden doğrudan derlendi: {excerpt(reason, 100)}.)"
+    return text
 
 def make_snippet(
     doc: Mapping[str, Any], highlights: Mapping[str, Sequence[str]] | None = None, limit: int = 240
