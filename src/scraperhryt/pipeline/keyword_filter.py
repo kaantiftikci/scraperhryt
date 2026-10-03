@@ -35,7 +35,7 @@ def load_keyword_aliases(path: str, canonical: list[str]) -> dict[str, str]:
         return {}
     file = Path(path)
     if not file.is_file():
-        log.debug("Anahtar kelime eş anlamlı dosyası yok: %s", path)
+        log.warning("Anahtar kelime eş anlamlı dosyası bulunamadı (%s); eş anlamlılar kapalı", path)
         return {}
     try:
         data = json.loads(file.read_text(encoding="utf-8"))

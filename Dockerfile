@@ -27,6 +27,8 @@ RUN mkdir -p src/scraperhryt \
 # 2) Gerçek kaynak kodu ve betikler.
 COPY src ./src
 COPY scripts ./scripts
+# Eş anlamlılar, ön sınıflandırıcı örnekleri, altın set ve RAG değerlendirme seti (KEYWORD_ALIASES_PATH vb.).
+COPY config ./config
 RUN pip install --no-deps . \
     && chmod +x scripts/*.sh \
     && mkdir -p /app/data \

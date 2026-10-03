@@ -18,6 +18,8 @@ from .hurriyet import HurriyetSource
 from .punto import PuntoSource
 from .state import MAX_PENDING_ATTEMPTS, SeenStore
 
+MAX_PENDING_BACKLOG = 2000  # bekleyen (bütçe nedeniyle ertelenen) bağlantı listesinin üst sınırı
+
 log = logging.getLogger(__name__)
 
 # Besleme güncelleme damgası (RSS <modified>) taşımayan bağlantılarda sayfayı çekmeden atlama penceresi (saat).
@@ -209,7 +211,8 @@ class ScrapeRunner:
             pending_links = self._pending_links(source.name, exclude={link.id for link in links})
             if pending_ids:
                 log.info("%s: %d bekleyen bağlantı yeniden denenecek", source.name, len(pending_ids))
-            links = pending_links + links
+            # Yeni keşfedilen haberler önce: birikmiş bekleyen liste güncel haberleri ve alarmları geciktirmesin.
+            links = links + pending_links
             log.info("%s: %d bağlantı keşfedildi", source.name, source_stats.discovered)
             for index_link, link in enumerate(links):
                 if stop_requested():
@@ -278,9 +281,14 @@ class ScrapeRunner:
     def _defer(self, source_name: str, links: list[DiscoveredLink], reason: str) -> None:
         """Bu turda sıra gelmeyen bağlantıları (daha önce görülmemişse) bekleyen listesine yazar."""
         deferred = 0
+        room = MAX_PENDING_BACKLOG - self.seen.pending_count()
         for link in links:
-            if self.seen.seen_recently(link.id, published_at=link.updated_hint or link.published_hint, within_hours=self._skip_window_hours(link)):
-                continue
+            if self.seen.get(link.id) is not None:
+                continue  # daha önce alınmış haber: yalnızca yeniden kontrol sırası geldi, "çekilemedi" değil
+            if room <= 0:
+                log.warning("Bekleyen liste dolu (%d); kalan bağlantılar bir sonraki keşifte yeniden bulunacak", MAX_PENDING_BACKLOG)
+                break
+            room -= 1
             self.seen.add_pending(
                 id=link.id, url=link.url, source=source_name, reason=reason, title=link.title_hint,
                 category=link.category_hint, published_at=link.published_hint, count_attempt=False,

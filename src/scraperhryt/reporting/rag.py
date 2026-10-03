@@ -432,13 +432,15 @@ def question_entities(question: str) -> list[str]:
     tokens = _WORD_RE.findall(question or "")
     out: list[str] = []
     group: list[str] = []
+    group_start = [-1]
 
     def flush() -> None:
-        if group and (len(group) > 1 or group[0] is not tokens[0]):
+        # Cümle başındaki tek sözcük ("Fon ...", "Türkiye'nin ...") büyük harfle yazıldığı için özel ad sayılmaz.
+        if group and (len(group) > 1 or group_start[0] != 0):
             out.append(" ".join(group))
         group.clear()
 
-    for raw in tokens:
+    for index, raw in enumerate(tokens):
         base = re.split(r"['’]", raw)[0]
         if len(base) >= 2 and base.isupper():
             flush()
@@ -446,6 +448,8 @@ def question_entities(question: str) -> list[str]:
             continue
         is_cap = base[:1].isupper() and tr_lower(base) not in _QUESTION_STOPWORDS
         if is_cap:
+            if not group:
+                group_start[0] = index
             group.append(base)
         else:
             flush()
@@ -470,9 +474,29 @@ def ground_entities(question: str, entities: Sequence[str]) -> list[str]:
     return kept
 
 
+# Tek başına konu belirtmeyen genel haber sözcüklerinin kökleri: soruda daha belirgin bir sözcük varsa
+# süzgeç bunlara dayanmaz ("Akaryakıt fiyatlarında..." → yalnızca "akaryakıt"; "fiyat" Tesla zammını da tutar).
+_GENERIC_STEMS = (
+    "fiyat", "zam", "ücret", "indirim", "artış", "düşüş", "açıkla", "dedi", "söyle", "karar", "gelişme",
+    "durum", "yeni", "konu", "olay", "son", "sonuç", "süreç", "tepki", "iddia", "yorum", "değerlendir",
+    "neler", "nasıl", "ne ", "oldu", "olacak", "yapıl", "çıktı", "geldi", "gündem",
+)
+# Unvanlar: "Bakan Fidan", "Başkan Özel" gibi sorularda haber "Dışişleri Bakanı Hakan Fidan" der; ad tek başına aranır.
+_TITLE_WORDS = frozenset(
+    "bakan bakanı başkan başkanı cumhurbaşkanı cumhurbaşkan genel sayın eski milletvekili vekili vali valisi "
+    "belediye başkanvekili lider lideri rektör rektörü prof dr av doç büyükelçi sözcü sözcüsü".split()
+)
+
+
+def _is_generic(word: str) -> bool:
+    return any(word.startswith(stem.strip()) for stem in _GENERIC_STEMS)
+
+
 def _question_matcher(question: str) -> KeywordMatcher | None:
     patterns: list[str] = []
-    for word, acronym in _question_words(question):
+    words = _question_words(question)
+    specific = [(w, a) for w, a in words if a or not _is_generic(w)]
+    for word, acronym in specific or words:
         if acronym:
             patterns.append(word)  # kısaltma: kök + ek ("TFF'den", "MHK'nın")
             continue
@@ -500,14 +524,17 @@ def filter_relevant(
         grounded = question_entities(question)
     phrases: list[str] = []
     for ent in grounded:
-        words = [w for w in tr_lower(ent).replace("'", " ").split() if w not in _QUESTION_STOPWORDS]
+        words = [w for w in tr_lower(ent).replace("'", " ").replace("’", " ").split() if w not in _QUESTION_STOPWORDS]
         if not words:
+            continue
+        names = [w for w in words if w not in _TITLE_WORDS]
+        if names and len(names) < len(words):
+            # "Bakan Fidan" → "fidan": haberde unvan farklı çekimle ve araya ad girerek geçer.
+            phrases.append(" ".join(names))
             continue
         phrases.append(" ".join(words))
         if len(words) > 1 and len(words[-1]) >= 6:
             phrases.append(words[-1])
-        if len(words) == 1 and len(words[0]) <= 4:
-            phrases[-1] = words[0]  # kısa kısaltma (tff, mhk): kök + ek eşleşmesi yeterli
     if phrases:
         matcher: KeywordMatcher | None = KeywordMatcher(phrases)
     elif question:
@@ -524,6 +551,46 @@ def filter_relevant(
         if matcher.matches(text):
             kept.append(item)
     return kept
+
+
+# Nokta ile biten ama cümle sonu olmayan kısaltmalar (küçük harfe çevrilmiş, noktasız).
+_ABBREVIATIONS = frozenset(
+    "dr av prof doç doc yrd op uzm öğr ogr arş ars gör gor vb vs bkz st no nr ltd şti sti a.ş a.s t.c "
+    "md mah cad sok apt blv bul tel fax yy örn orn mr mrs ms jr sr".split()
+)
+_BOUNDARY_RE = re.compile(r"[.!?…](?:\s*\[\d+\])*\.?(?=\s|$)")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Türkçe haber metnini cümlelere böler. Kısaltmalarda ("Dr.", "Av.", "A.Ş."), tek harfli baş harflerde
+    ("M. Kaya") ve sıra sayılarında ("8. haftasında", "39. Olağan Kurultay") bölmez; atıf numaraları ("[1]")
+    cümlenin sonunda kalır."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return []
+    sentences: list[str] = []
+    start = 0
+    for match in _BOUNDARY_RE.finditer(text):
+        end = match.end()
+        dot = match.start()
+        if text[dot] == ".":
+            token = re.search(r"([0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû.]+)$", text[start:dot])
+            word = token.group(1) if token else ""
+            rest = text[end:].lstrip()
+            if word.isdigit() and rest and not rest.startswith("["):
+                continue  # sıra sayısı: "8. hafta", "39. Olağan"
+            if len(word) == 1 and word.isalpha() and word.isupper():
+                continue  # baş harf: "M. Kaya"
+            if tr_lower(word).strip(".") in _ABBREVIATIONS:
+                continue
+        piece = text[start:end].strip()
+        if piece:
+            sentences.append(piece)
+        start = end
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 _REFUSAL_PREFIX_RE = re.compile(r"^\s*elimdeki haberlerde bu konuda yeterli bilgi yok\.?\s*", re.IGNORECASE)
@@ -552,17 +619,24 @@ def condense_answer(text: str, max_sentences: int = MAX_ANSWER_SENTENCES) -> str
     """Model yanıtını kısa tek paragrafa indirger: "Özet:" gibi etiketleri atar, tekrarlanan cümleleri eler,
     en fazla ``max_sentences`` cümle tutar (atıf numaraları cümleyle birlikte kalır)."""
     pieces: list[str] = []
-    for match in re.finditer(r".+?(?:[.!?](?:\s*\[\d+\])*\.?|$)(?=\s|$)", text.replace("\n", " ")):
-        sentence = _LABEL_RE.sub("", match.group(0)).strip()
+    for raw in split_sentences(text):
+        sentence = _LABEL_RE.sub("", raw).strip()
         if len(sentence) < 3:
             continue
         pieces.append(sentence)
     kept: list[str] = []
     seen: list[str] = []
+
+    def is_repeat(key: str, other: str) -> bool:
+        if key[:60] == other[:60]:
+            return True
+        shorter, longer = (key, other) if len(key) <= len(other) else (other, key)
+        return len(shorter) >= 25 and shorter in longer  # kısa parçalar ("av", "dr") tekrar sayılmaz
+
     for sentence in pieces:
         key = tr_lower(re.sub(r"\[\d+\]", "", sentence))
         key = re.sub(r"\W+", " ", key).strip()
-        if not key or any(key[:70] == other[:70] or key in other or other in key for other in seen):
+        if not key or any(is_repeat(key, other) for other in seen):
             continue
         seen.append(key)
         kept.append(sentence)
@@ -577,17 +651,19 @@ def _looks_like_listing(text: str) -> bool:
 
 
 def _is_refusal(text: str) -> bool:
-    low = tr_lower(text)
-    return len(low) < 220 and ("yeterli bilgi yok" in low or "bilgi bulunmuyor" in low or "bilgi bulunmamaktadır" in low)
+    """Yanıt bir ret mi? Kaynak numarası ([1]) taşıyan yanıt haberlere dayanıyordur, ret sayılmaz
+    ("...can kaybına ilişkin bilgi bulunmuyor [1]." geçerli bir yanıttır)."""
+    low = tr_lower(text).strip()
+    if len(low) >= 220 or re.search(r"\[\d+\]", low):
+        return False
+    return "yeterli bilgi yok" in low or low.startswith(("bu konuda bilgi bulunmuyor", "bu konuda bilgi bulunmamaktadır"))
 
 
 def _first_sentence(text: str, limit: int = 220) -> str:
-    text = flat_text(text)
-    if not text:
+    sentences = split_sentences(flat_text(text))
+    if not sentences:
         return ""
-    match = re.search(r"^(.+?[.!?])(\s|$)", text)
-    sentence = match.group(1) if match else text
-    return excerpt(sentence, limit).rstrip(".…") 
+    return excerpt(sentences[0], limit).rstrip(".…")
 
 
 def extractive_answer(ordered: Sequence[RankedDoc], citations: Sequence[Citation], *, reason: str = "") -> str:
