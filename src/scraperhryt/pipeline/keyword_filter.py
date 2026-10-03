@@ -9,9 +9,11 @@ Yönlendirme kuralı (BUILD_SPEC §B):
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -21,6 +23,40 @@ from ..models import NewsRecord, Stage
 from ..textutil import KeywordHit, KeywordMatcher, excerpt
 
 log = logging.getLogger(__name__)
+
+
+def load_keyword_aliases(path: str, canonical: list[str]) -> dict[str, str]:
+    """``config/keyword_aliases.json`` → {alias: kanonik}. Dosya yoksa boş; bozuksa uyarı verip boş döner.
+
+    Yalnızca ayarlı anahtar kelimelerin (``canonical``) eş anlamlıları yüklenir; '_' ile başlayan anahtarlar yorumdur.
+    """
+    if not path:
+        return {}
+    file = Path(path)
+    if not file.is_file():
+        log.debug("Anahtar kelime eş anlamlı dosyası yok: %s", path)
+        return {}
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("JSON nesnesi bekleniyor")
+    except (OSError, ValueError) as exc:
+        log.warning("Eş anlamlı dosyası okunamadı (%s), eş anlamlılar kapalı: %s", path, exc)
+        return {}
+    wanted = {k.strip().lower(): k.strip() for k in canonical}
+    aliases: dict[str, str] = {}
+    for key, values in data.items():
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        canon = wanted.get(key.strip().lower())
+        if canon is None or not isinstance(values, list):
+            continue
+        for alias in values:
+            if isinstance(alias, str) and alias.strip() and alias.strip().lower() != canon.lower():
+                aliases[alias.strip()] = canon
+    if aliases:
+        log.info("Anahtar kelime eş anlamlıları yüklendi: %d alias (%s)", len(aliases), path)
+    return aliases
 
 
 @dataclass
@@ -41,7 +77,8 @@ class KeywordFilterService:
     def __init__(self, settings: Settings, broker: Broker) -> None:
         self.settings = settings
         self.broker = broker
-        self.matcher = KeywordMatcher(settings.keyword_list)
+        self.aliases = load_keyword_aliases(settings.keyword_aliases_path, settings.keyword_list)
+        self.matcher = KeywordMatcher(list(settings.keyword_list) + list(self.aliases))
         self.stats = FilterStats()
         if not settings.keyword_list:
             log.warning(
@@ -51,8 +88,20 @@ class KeywordFilterService:
             )
 
     def classify(self, record: NewsRecord) -> list[KeywordHit]:
-        """Başlık + alt başlık + içerikte eşleşen anahtar kelimeleri (sayı ve örnek bağlamla) döndürür."""
-        return self.matcher.find(record.text_for_matching())
+        """Başlık + alt başlık + içerikte eşleşen anahtar kelimeleri (sayı ve örnek bağlamla) döndürür.
+
+        Eş anlamlı eşleşmeleri kanonik anahtar kelimeye katlanır; sıra ``settings.keyword_list`` sırasıdır.
+        """
+        merged: dict[str, KeywordHit] = {}
+        for hit in self.matcher.find(record.text_for_matching()):
+            canon = self.aliases.get(hit.keyword, hit.keyword)
+            if canon in merged:
+                merged[canon].count += hit.count
+                merged[canon].samples = (merged[canon].samples + hit.samples)[:3]
+            else:
+                merged[canon] = KeywordHit(keyword=canon, count=hit.count, samples=list(hit.samples))
+        order = {k: i for i, k in enumerate(self.settings.keyword_list)}
+        return sorted(merged.values(), key=lambda h: order.get(h.keyword, len(order)))
 
     def handle(self, msg: Message) -> None:
         self.stats.received += 1

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ..config import Settings
-from ..models import Answer, Citation, utcnow
+from ..models import Answer, Citation, TimelineItem, utcnow
 from ..pipeline.llm import LLM, HeuristicLLM, LLMError
 from ..store import ArticleStore, SearchHit
 from ..textutil import excerpt, normalize_ws, tr_lower
@@ -206,6 +206,7 @@ class QAEngine:
             model=model,
             retrieved_count=len(citations),
             search_terms=search_terms,
+            timeline=build_timeline(citations),
         )
 
     # --- 1. sorgu yeniden yazma ---
@@ -347,6 +348,23 @@ class QAEngine:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return extractive_answer(ordered, citations), FALLBACK_MODEL
         return text, self.llm.model_name
+
+
+def build_timeline(citations: Sequence[Citation]) -> list[TimelineItem]:
+    """Atıflardan kronolojik (eski → yeni) zaman çizelgesi: her kaynak bir olay satırı, [n] numarasıyla."""
+    items = [
+        TimelineItem(
+            date=c.published_at,
+            event=c.title,
+            source=c.source,
+            content_url=c.content_url,
+            citation=i,
+        )
+        for i, c in enumerate(citations, 1)
+    ]
+    dated = sorted((it for it in items if it.date is not None), key=lambda it: it.date)  # type: ignore[arg-type]
+    undated = [it for it in items if it.date is None]
+    return dated + undated
 
 
 def newest_first(ranked: Sequence[RankedDoc]) -> list[RankedDoc]:

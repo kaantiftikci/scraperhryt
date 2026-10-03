@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import logging
 import os
 import signal
@@ -552,6 +553,11 @@ def format_answer(answer: Answer) -> str:
         "",
         answer.answer.strip() or "(cevap üretilemedi)",
     ]
+    if answer.timeline:
+        lines.extend(["", "Zaman çizelgesi (eski → yeni):"])
+        for item in answer.timeline:
+            marker = f"[{item.citation}] " if item.citation else ""
+            lines.append(f"  {fmt_dt(item.date):<17} {marker}{item.event}")
     if answer.sources:
         lines.extend(["", "Kaynaklar:"])
         for index, citation in enumerate(answer.sources, 1):
@@ -900,6 +906,123 @@ def cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
         print(answer.model_dump_json(indent=2))
     else:
         print(format_answer(answer))
+    return 0
+
+
+def cmd_calibrate(args: argparse.Namespace, settings: Settings) -> int:
+    """Altın set (+ isteğe bağlı geri bildirim) üzerinde LLM skorlarını ölçer, eşik önerir."""
+    from .broker import InMemoryBroker
+    from .pipeline.calibration import (
+        feedback_items,
+        format_calibration_report,
+        load_golden_set,
+        run_calibration,
+    )
+    from .pipeline.scorer import ScoringService
+
+    try:
+        items = load_golden_set(args.golden or settings.golden_set_path)
+    except FileNotFoundError as exc:
+        log.error("%s", exc)
+        return 1
+    store = None
+    if args.from_feedback:
+        try:
+            store = prepare_store(settings, in_memory=False)
+            items += feedback_items(store.list_feedback(size=1000), store)
+        except Exception as exc:
+            log.error("Geri bildirimler okunamadı: %s", describe_exc(exc))
+            return 1
+    if not items:
+        log.error("Kalibrasyon için örnek yok")
+        return 1
+    llm = build_llm(settings, fake=args.fake_llm, fallback=False)
+    try:
+        scorer = ScoringService(settings, InMemoryBroker(settings), llm)
+        report = run_calibration(scorer, items, current_threshold=settings.alarm_threshold)
+    finally:
+        close_llm(llm)
+    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2) if args.json else format_calibration_report(report))
+    return 0 if report.failures < len(items) else 1
+
+
+def cmd_rescore(args: argparse.Namespace, settings: Settings) -> int:
+    """Depodaki kayıtları article.keyword ile yeniden yayınlar (model/prompt/eşik değişiminden sonra)."""
+    from .pipeline.rescore import Rescorer
+
+    try:
+        store = prepare_store(settings, in_memory=False)
+    except Exception as exc:
+        log.error("Elasticsearch deposu hazırlanamadı: %s", describe_exc(exc))
+        return 1
+    broker = make_broker(settings)
+    try:
+        if not args.dry_run:
+            broker.declare_topology()
+        stats = Rescorer(settings, store, broker).run(
+            since_days=args.since_days, only_keyword_hits=not args.all, limit=args.limit, dry_run=args.dry_run
+        )
+    except Exception as exc:
+        log.error("Yeniden skorlama başarısız: %s", describe_exc(exc))
+        return 1
+    finally:
+        broker.close()
+    print(
+        f"Yeniden skorlama{' (dry-run)' if stats.dry_run else ''}: seçilen={stats.selected} "
+        f"yayınlanan={stats.published} atlanan={stats.skipped} → {Queue.ARTICLES_KEYWORD}"
+    )
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace, settings: Settings) -> int:
+    """q.dead_letter mesajlarını köken kuyruklarına geri oynatır."""
+    from .broker import RabbitMQBroker
+    from .replay import format_replay, replay_dead_letters
+
+    broker = make_broker(settings)
+    if not isinstance(broker, RabbitMQBroker):
+        log.error("Ölü mektup geri oynatma yalnızca RabbitMQ ile çalışır (RABBITMQ_URL)")
+        return 1
+    try:
+        broker.declare_topology()
+        stats = replay_dead_letters(broker, limit=args.limit, dry_run=args.dry_run, target_queue=args.to)
+    except Exception as exc:
+        log.error("Geri oynatma başarısız: %s", describe_exc(exc))
+        return 1
+    finally:
+        broker.close()
+    print(format_replay(stats))
+    return 0
+
+
+def cmd_feedback(args: argparse.Namespace, settings: Settings) -> int:
+    """Bir alarmı doğru/yanlış pozitif olarak etiketler (news-feedback)."""
+    import hashlib
+
+    from .models import Feedback, utcnow
+
+    try:
+        store = prepare_store(settings, in_memory=False)
+        alarm = store.get_alarm(args.alarm_id)
+        if alarm is None:
+            log.error("Alarm bulunamadı: %s", args.alarm_id)
+            return 1
+        stamp = utcnow()
+        fb = Feedback(
+            feedback_id=hashlib.sha1(f"{args.alarm_id}:{args.label}:{stamp.isoformat()}".encode()).hexdigest()[:20],
+            alarm_id=args.alarm_id,
+            record_id=str(alarm.get("record_id", "")),
+            label=args.label,
+            note=args.note or "",
+            user=args.user or "",
+            channel="cli",
+            created_at=stamp,
+        )
+        store.index_feedback(fb, refresh=True)
+    except Exception as exc:
+        log.error("Geri bildirim kaydedilemedi: %s", describe_exc(exc))
+        return 1
+    print(f"Geri bildirim kaydedildi: {fb.feedback_id} alarm={fb.alarm_id} etiket={fb.label}")
     return 0
 
 
@@ -1292,6 +1415,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="yanıtı JSON olarak yazdır")
     _add_fake_llm(p)
     p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser("calibrate", help="altın set üzerinde LLM skorlarını ölç, eşik öner (config/golden_set.jsonl)")
+    p.add_argument("--golden", help="altın set JSONL yolu (varsayılan GOLDEN_SET_PATH)")
+    p.add_argument("--from-feedback", action="store_true", help="Elasticsearch'teki insan geri bildirimlerini de örnek olarak ekle")
+    p.add_argument("--fake-llm", action="store_true", help="Ollama yerine sezgisel değerlendirici")
+    p.add_argument("--json", action="store_true", help="JSON çıktı")
+    p.set_defaults(func=cmd_calibrate)
+
+    p = sub.add_parser("rescore", help="depodaki kayıtları yeniden skorlanmak üzere q.articles.keyword'e yayınla")
+    p.add_argument("--since-days", type=int, default=7, help="son N gün (varsayılan 7)")
+    p.add_argument("--all", action="store_true", help="anahtar kelime eşleşmeyenleri de dahil et")
+    p.add_argument("--limit", type=int, help="en çok N kayıt")
+    p.add_argument("--dry-run", action="store_true", help="yayınlamadan say")
+    p.set_defaults(func=cmd_rescore)
+
+    p = sub.add_parser("replay-dead-letters", help="q.dead_letter mesajlarını köken kuyruklarına geri oynat")
+    p.add_argument("--limit", type=int, help="en çok N mesaj")
+    p.add_argument("--dry-run", action="store_true", help="listele, kuyruğa dokunma")
+    p.add_argument("--to", help="köken bilinmiyorsa hedef kuyruk (ör. q.articles.keyword)")
+    p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("feedback", help="bir alarmı doğru/yanlış pozitif olarak etiketle")
+    p.add_argument("alarm_id")
+    p.add_argument("--label", required=True, choices=["true_positive", "false_positive", "needs_context"])
+    p.add_argument("--note", help="açıklama")
+    p.add_argument("--user", help="etiketleyen")
+    p.set_defaults(func=cmd_feedback)
 
     p = sub.add_parser("run-all", help="tüm katmanları tek süreçte çalıştır")
     p.add_argument(

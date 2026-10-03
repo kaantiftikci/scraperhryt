@@ -29,7 +29,7 @@ import math
 import re
 import threading
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -41,12 +41,14 @@ from elasticsearch import TransportError as ESTransportError
 
 from .broker import Unavailable
 from .config import Settings, get_settings
-from .models import AlarmEvent, NewsRecord, Report
+from .models import AlarmEvent, Feedback, NewsRecord, Report
 from .textutil import tr_lower
 
 log = logging.getLogger(__name__)
 
 TR_ANALYZER = "tr_text"
+FEEDBACK_INDEX = "news-feedback"  # alarm geri bildirimleri (doğru/yanlış pozitif)
+FEEDBACK_LABELS = ("true_positive", "false_positive", "needs_context")
 SEARCH_FIELDS = ["title^3", "subtitle^2", "content", "llm_summary^2", "alarm_reason"]
 TOP_ALARM_FIELDS = [
     "id", "title", "content_url", "source", "alarm_score", "alarm_reason", "llm_summary", "published_at",
@@ -113,6 +115,23 @@ class ArticleStore(Protocol):
     ) -> list[SearchHit]: ...
     def refresh(self) -> None: ...
     def health(self) -> bool: ...
+    def index_feedback(self, feedback: Feedback, refresh: bool = False) -> None: ...
+    def list_feedback(
+        self, *, since: datetime | None = None, alarm_id: str | None = None, size: int = 200
+    ) -> list[dict[str, Any]]: ...
+    def feedback_stats(self, since: datetime | None = None) -> dict[str, Any]: ...
+    def find_similar_alarms(
+        self, *, title: str, embedding: Sequence[float] | None = None, since: datetime | None = None, size: int = 10
+    ) -> list[SearchHit]: ...
+    def iter_records(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        only_keyword_hits: bool = False,
+        sources: Sequence[str] | None = None,
+        batch_size: int = 50,
+    ) -> Iterator[dict[str, Any]]: ...
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -450,6 +469,42 @@ def _describe(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------------------------------------
 
 
+def build_feedback_mapping() -> dict[str, Any]:
+    """``news-feedback`` indeksi: ``Feedback.to_es_document`` alanları."""
+    properties: dict[str, Any] = {
+        "@timestamp": _DATE,
+        "feedback_id": _KEYWORD,
+        "alarm_id": _KEYWORD,
+        "record_id": _KEYWORD,
+        "label": _KEYWORD,
+        "note": _text(),
+        "user": _KEYWORD,
+        "channel": _KEYWORD,
+        "created_at": _DATE,
+    }
+    return {"settings": build_index_settings(), "mappings": {"dynamic": False, "properties": properties}}
+
+
+def summarize_feedback(docs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Geri bildirim belgelerinden etiket sayıları ve kesinlik tahmini (tp / (tp + fp))."""
+    counts = {label: 0 for label in FEEDBACK_LABELS}
+    for doc in docs:
+        label = str(doc.get("label", ""))
+        if label in counts:
+            counts[label] += 1
+    judged = counts["true_positive"] + counts["false_positive"]
+    precision = round(counts["true_positive"] / judged, 3) if judged else None
+    return {"total": len(docs), **counts, "precision_estimate": precision}
+
+
+def _alarm_similarity_filters(since: datetime | None) -> list[dict[str, Any]]:
+    filters: list[dict[str, Any]] = [{"term": {"is_alarm": True}}]
+    ts = _range_filter("@timestamp", since, None)
+    if ts is not None:
+        filters.append(ts)
+    return filters
+
+
 class ElasticsearchStore:
     """elasticsearch-py 8 üzerinden üç indeksi yöneten depo. ``client`` testlerde sahte istemci için verilebilir."""
 
@@ -561,6 +616,7 @@ class ElasticsearchStore:
             self._reconcile_embedding_mapping(article_mapping["mappings"]["properties"]["embedding"])
         self._create_index(self.index_alarms, build_alarm_mapping(self.settings))
         self._create_index(self.index_reports, build_report_mapping(self.settings))
+        self._create_index(FEEDBACK_INDEX, build_feedback_mapping())
 
     def index_record(
         self, record: NewsRecord, refresh: bool = False, embedding: Sequence[float] | None = None
@@ -721,6 +777,104 @@ class ElasticsearchStore:
         res = self.es.search(index=self.index_articles, knn=knn, size=int(k), source_excludes=["embedding"])
         return _hits_to_search_hits(res)
 
+    # --- geri bildirim ---
+    def index_feedback(self, feedback: Feedback, refresh: bool = False) -> None:
+        self._write(
+            "index_feedback",
+            self.es.index,
+            index=FEEDBACK_INDEX,
+            id=feedback.feedback_id,
+            document=feedback.to_es_document(),
+            refresh=refresh,
+        )
+
+    def list_feedback(
+        self, *, since: datetime | None = None, alarm_id: str | None = None, size: int = 200
+    ) -> list[dict[str, Any]]:
+        filters: list[dict[str, Any]] = []
+        ts = _range_filter("created_at", since, None)
+        if ts is not None:
+            filters.append(ts)
+        if alarm_id:
+            filters.append({"term": {"alarm_id": alarm_id}})
+        res = self.es.search(
+            index=FEEDBACK_INDEX,
+            query={"bool": {"filter": filters}} if filters else {"match_all": {}},
+            size=size,
+            sort=[{"created_at": {"order": "desc"}}],
+        )
+        return [h.doc for h in _hits_to_search_hits(res)]
+
+    def feedback_stats(self, since: datetime | None = None) -> dict[str, Any]:
+        return summarize_feedback(self.list_feedback(since=since, size=1000))
+
+    # --- olay kümeleme / yeniden skorlama yardımcıları ---
+    def find_similar_alarms(
+        self, *, title: str, embedding: Sequence[float] | None = None, since: datetime | None = None, size: int = 10
+    ) -> list[SearchHit]:
+        """Pencere içindeki alarmlı kayıtlar arasında benzerleri bulur: embedding varsa kNN (skor=(1+cos)/2), yoksa başlık eşleşmesi."""
+        filters = _alarm_similarity_filters(since)
+        if embedding and self.embeddings_enabled and len(embedding) == int(self.settings.embedding_dims):
+            knn = {
+                "field": "embedding",
+                "query_vector": [float(x) for x in embedding],
+                "k": int(size),
+                "num_candidates": max(50, 5 * int(size)),
+                "filter": {"bool": {"filter": filters}},
+            }
+            res = self.es.search(index=self.index_articles, knn=knn, size=int(size), source_excludes=["embedding"])
+            return _hits_to_search_hits(res)
+        if not title.strip():
+            return []
+        res = self.es.search(
+            index=self.index_articles,
+            query={"bool": {"must": [{"match": {"title": {"query": title, "minimum_should_match": "50%"}}}], "filter": filters}},
+            size=int(size),
+            source_excludes=["embedding"],
+        )
+        return _hits_to_search_hits(res)
+
+    def iter_records(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        only_keyword_hits: bool = False,
+        sources: Sequence[str] | None = None,
+        batch_size: int = 50,
+    ) -> Iterator[dict[str, Any]]:
+        """Kayıtları eskiden yeniye ``search_after`` ile sayfalayarak döndürür (yeniden skorlama için)."""
+        filters: list[dict[str, Any]] = []
+        ts = _range_filter("@timestamp", since, until)
+        if ts is not None:
+            filters.append(ts)
+        if sources:
+            filters.append({"terms": {"source": list(sources)}})
+        if only_keyword_hits:
+            filters.append({"exists": {"field": "matched_keywords"}})
+        query = {"bool": {"filter": filters}} if filters else {"match_all": {}}
+        search_after: list[Any] | None = None
+        size = max(1, int(batch_size))
+        while True:
+            kwargs: dict[str, Any] = {
+                "index": self.index_articles,
+                "query": query,
+                "size": size,
+                "sort": [{"@timestamp": {"order": "asc"}}, {"id": {"order": "asc"}}],
+                "source_excludes": ["embedding"],
+            }
+            if search_after is not None:
+                kwargs["search_after"] = search_after
+            res = self.es.search(**kwargs)
+            hits = res["hits"]["hits"]
+            if not hits:
+                return
+            for hit in hits:
+                yield dict(hit["_source"])
+            search_after = hits[-1].get("sort")
+            if len(hits) < size or search_after is None:
+                return
+
     def refresh(self) -> None:
         self._write(
             "indices.refresh",
@@ -802,6 +956,7 @@ class InMemoryStore:
         self.alarms: dict[str, dict[str, Any]] = {}
         self.reports: dict[str, dict[str, Any]] = {}
         self.embeddings: dict[str, list[float]] = {}
+        self.feedback: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def ensure_indices(self) -> None:
@@ -976,6 +1131,80 @@ class InMemoryStore:
             scored.append((_cosine(vector, vec), ts, rid, doc))
         scored.sort(key=lambda item: (-item[0], -item[1].timestamp(), item[2]))
         return [SearchHit(doc=doc, score=round(sim, 6)) for sim, _ts, _rid, doc in scored[: int(k)]]
+
+    # --- geri bildirim ---
+    def index_feedback(self, feedback: Feedback, refresh: bool = False) -> None:
+        with self._lock:
+            self.feedback[feedback.feedback_id] = feedback.to_es_document()
+
+    def list_feedback(
+        self, *, since: datetime | None = None, alarm_id: str | None = None, size: int = 200
+    ) -> list[dict[str, Any]]:
+        since_dt = _aware(since) if since else None
+        with self._lock:
+            docs = [dict(d) for d in self.feedback.values()]
+        if alarm_id:
+            docs = [d for d in docs if d.get("alarm_id") == alarm_id]
+        if since_dt is not None:
+            docs = [d for d in docs if (_parse_dt(d.get("created_at")) or _doc_timestamp(d)) >= since_dt]
+        docs.sort(key=lambda d: str(d.get("created_at", "")), reverse=True)
+        return docs[: max(0, size)]
+
+    def feedback_stats(self, since: datetime | None = None) -> dict[str, Any]:
+        return summarize_feedback(self.list_feedback(since=since, size=1000))
+
+    # --- olay kümeleme / yeniden skorlama yardımcıları ---
+    def find_similar_alarms(
+        self, *, title: str, embedding: Sequence[float] | None = None, since: datetime | None = None, size: int = 10
+    ) -> list[SearchHit]:
+        since_dt = _aware(since) if since else None
+        query_tokens = set(tokenize(title))
+        with self._lock:
+            docs = [dict(d) for d in self.records.values() if d.get("is_alarm")]
+            vectors = dict(self.embeddings)
+        hits: list[SearchHit] = []
+        for doc in docs:
+            if since_dt is not None and _doc_timestamp(doc) < since_dt:
+                continue
+            vec = vectors.get(str(doc.get("id", "")))
+            if embedding and vec is not None and len(vec) == len(embedding):
+                score = (1.0 + _cosine(embedding, vec)) / 2.0  # ES kNN kosinüs skoru ile aynı ölçek
+            else:
+                doc_tokens = set(tokenize(str(doc.get("title", ""))))
+                union = query_tokens | doc_tokens
+                score = len(query_tokens & doc_tokens) / len(union) if union else 0.0
+            if score > 0:
+                hits.append(SearchHit(doc=doc, score=score))
+        hits.sort(key=lambda h: (-h.score, str(h.doc.get("id", ""))))
+        return hits[: max(0, size)]
+
+    def iter_records(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        only_keyword_hits: bool = False,
+        sources: Sequence[str] | None = None,
+        batch_size: int = 50,
+    ) -> Iterator[dict[str, Any]]:
+        since_dt = _aware(since) if since else None
+        until_dt = _aware(until) if until else None
+        with self._lock:
+            docs = [dict(d) for d in self.records.values()]
+        selected = []
+        for doc in docs:
+            ts = _doc_timestamp(doc)
+            if since_dt is not None and ts < since_dt:
+                continue
+            if until_dt is not None and ts > until_dt:
+                continue
+            if sources and doc.get("source") not in set(sources):
+                continue
+            if only_keyword_hits and not doc.get("matched_keywords"):
+                continue
+            selected.append((ts, str(doc.get("id", "")), doc))
+        selected.sort(key=lambda item: (item[0], item[1]))
+        yield from (doc for _ts, _id, doc in selected)
 
     def refresh(self) -> None:
         return None

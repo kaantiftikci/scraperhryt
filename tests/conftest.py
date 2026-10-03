@@ -20,6 +20,8 @@ _ISOLATED_ENV = {
     "ALARM_WEBHOOK_URL": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_CHAT_ID": "",
+    "KEYWORD_ALIASES_PATH": "",  # testler eş anlamlı dosyasını açıkça seçer
+    "ALARM_THRESHOLDS_JSON": "",
 }
 
 

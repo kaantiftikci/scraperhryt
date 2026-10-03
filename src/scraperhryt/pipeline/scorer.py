@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import re
+import statistics
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -30,6 +31,7 @@ from ..models import LLMVerdict, NewsRecord
 from ..textutil import excerpt, normalize_ws, tr_fold, tr_lower
 from .llm import LLM, HeuristicLLM, LLMBadOutput, LLMUnavailable, redact_url
 from .prompts import STRICT_JSON_REMINDER, TOPICS, build_system_prompt, build_user_prompt
+from .thresholds import resolve_threshold
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +130,16 @@ def coerce_score(value: Any) -> int:
     if not math.isfinite(number):
         raise LLMBadOutput(f"alarm_score sonlu değil: {value!r}")
     return max(0, min(100, int(round(number))))
+
+
+def coerce_confidence(value: Any, default: int = 60) -> int:
+    """Modelin 'confidence' alanı (0-100); yoksa/bozuksa varsayılan."""
+    try:
+        if value is None:
+            return default
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return default
 
 
 def coerce_bool(value: Any, default: bool) -> bool:
@@ -242,6 +254,7 @@ def build_verdict(
         summary=coerce_text(data.get("summary")),
         topics=normalize_topics(coerce_str_list(data.get("topics"))),
         entities=coerce_str_list(data.get("entities")),
+        confidence=coerce_confidence(data.get("confidence")),
         latency_ms=max(0, int(latency_ms)),
         attempts=max(1, int(attempts)),
         raw=raw[:RAW_LIMIT],
@@ -354,14 +367,69 @@ class ScoringService:
             delay = min(delay * 2, LLM_POLL_MAX_SECONDS)
 
     # --- puanlama ---
+    def threshold_for(self, record: NewsRecord) -> int:
+        """Kayıt için kaynak/kategori/anahtar kelime bazlı eşik (ALARM_THRESHOLDS_JSON), yoksa alarm_threshold."""
+        return resolve_threshold(self.settings, record)
+
     def score_record(self, record: NewsRecord) -> NewsRecord:
         """Kaydı LLM ile puanlar ve ``apply_verdict`` uygular (saf: broker'a yazmaz, beklemez).
 
-        ``LLMVerdict.latency_ms`` tüm denemelerin toplam süresidir; ``attempts`` başarılı denemenin sırasıdır.
-        Ollama erişilemiyorsa / model yoksa ``Unavailable``, Ollama ayakta ama çağrı başarısızsa ``Retry``;
-        ``MAX_LLM_ATTEMPTS`` denemede geçerli karar çıkmazsa ``Retry`` fırlatır.
+        ``llm_samples > 1`` ise aynı haber N kez puanlanır (öz-tutarlılık): medyan skor alınır, örnekler arası
+        fark ``llm_disagreement_threshold``'u aşarsa ``needs_review`` işaretlenir ve güven düşer.
+        Ollama erişilemiyorsa ``Unavailable``, çağrı başarısızsa ``Retry``; ``MAX_LLM_ATTEMPTS`` denemede geçerli
+        karar çıkmazsa ``Retry`` fırlatır.
         """
         system, user = self.build_prompts(record)
+        samples = max(1, int(self.settings.llm_samples))
+        if samples == 1:
+            verdict = self._verdict_once(record, system, user)
+        else:
+            verdict = self._verdict_sampled(record, system, user, samples)
+        threshold = self.threshold_for(record)
+        record.apply_verdict(verdict, threshold)
+        spread = (max(verdict.samples) - min(verdict.samples)) if len(verdict.samples) > 1 else 0
+        record.needs_review = spread > int(self.settings.llm_disagreement_threshold)
+        if record.needs_review:
+            log.warning(
+                "LLM örnekleri uyuşmuyor [%s] %s: skorlar=%s fark=%d → insan incelemesi önerilir",
+                record.source,
+                excerpt(record.title, 80),
+                verdict.samples,
+                spread,
+            )
+        return record
+
+    def _verdict_sampled(self, record: NewsRecord, system: str, user: str, samples: int) -> LLMVerdict:
+        verdicts: list[LLMVerdict] = []
+        for i in range(samples):
+            try:
+                verdicts.append(
+                    self._verdict_once(record, system, user, temperature=self.settings.llm_sample_temperature)
+                )
+            except Retry as exc:
+                if not verdicts:
+                    raise
+                log.warning("Örnekleme %d/%d başarısız, eldeki %d örnekle devam: %s", i + 1, samples, len(verdicts), exc)
+                break
+        scores = [v.alarm_score for v in verdicts]
+        median = int(round(statistics.median(scores)))
+        spread = max(scores) - min(scores)
+        model_conf = int(round(statistics.mean(v.confidence for v in verdicts)))
+        confidence = int(round((max(0, 100 - 2 * spread) + model_conf) / 2))
+        chosen = min(verdicts, key=lambda v: (abs(v.alarm_score - median), -v.confidence))
+        return chosen.model_copy(
+            update={
+                "alarm_score": median,
+                "confidence": confidence,
+                "samples": scores,
+                "latency_ms": sum(v.latency_ms for v in verdicts),
+                "attempts": sum(v.attempts for v in verdicts),
+            }
+        )
+
+    def _verdict_once(
+        self, record: NewsRecord, system: str, user: str, *, temperature: float | None = None
+    ) -> LLMVerdict:
         prompt = user
         title = excerpt(record.title, 80)
         last_error: LLMBadOutput | None = None
@@ -369,11 +437,11 @@ class ScoringService:
         for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
             self.stats.llm_calls += 1
             try:
-                data = self.llm.chat_json(system, prompt)
+                data = self.llm.chat_json(system, prompt, temperature=temperature)
                 verdict = build_verdict(
                     data,
                     model=self.llm.model_name,
-                    threshold=self.settings.alarm_threshold,
+                    threshold=self.threshold_for(record),
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     attempts=attempt,
                     raw=json.dumps(data, ensure_ascii=False, default=str),
@@ -403,8 +471,8 @@ class ScoringService:
                 )
                 prompt = user + STRICT_JSON_REMINDER
                 continue
-            record.apply_verdict(verdict, self.settings.alarm_threshold)
-            return record
+            verdict.samples = [verdict.alarm_score]
+            return verdict
         self.stats.exhausted += 1
         raise Retry(f"LLM {MAX_LLM_ATTEMPTS} denemede geçerli karar üretemedi: {last_error}") from last_error
 
@@ -445,7 +513,7 @@ class ScoringService:
         return build_verdict(
             data,
             model=FALLBACK_MODEL,
-            threshold=self.settings.alarm_threshold,
+            threshold=self.threshold_for(record),
             attempts=attempts,
             raw=json.dumps(data, ensure_ascii=False, default=str),
         )
@@ -475,7 +543,7 @@ class ScoringService:
                 excerpt(record.title, 80),
                 exc,
             )
-            record.apply_verdict(self.fallback_verdict(record, exc, attempts), self.settings.alarm_threshold)
+            record.apply_verdict(self.fallback_verdict(record, exc, attempts), self.threshold_for(record))
         self.broker.publish(RoutingKey.ARTICLE_SCORED, record.to_message())
         self.stats.scored += 1
         if record.is_alarm:

@@ -38,6 +38,7 @@ from ..config import Settings
 from ..models import AlarmEvent, NewsRecord, Stage, utcnow
 from ..store import ArticleStore
 from ..textutil import excerpt
+from .dedup import EventClusterer
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class AlarmStats:
     duplicates: int = 0  # yeniden teslim edilen, zaten yükseltilmiş alarmlar
     notify_failures: int = 0
     embed_failures: int = 0
+    suppressed: int = 0  # tekrar (duplicate_of) olduğu için bildirimi bastırılan alarmlar
     rejected: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -89,6 +91,7 @@ class AlarmService:
         self.sinks: list[AlarmSink] = list(sinks) if sinks is not None else build_sinks(settings)
         self.embedder = embedder if settings.ollama_embedding_model else None
         self.stats = AlarmStats()
+        self.clusterer = EventClusterer(settings, store)
         self._stop_event = threading.Event()
         if embedder is not None and self.embedder is None:
             log.info("embedder verildi ama OLLAMA_EMBEDDING_MODEL boş; vektör üretimi kapalı")
@@ -222,20 +225,44 @@ class AlarmService:
 
         record.alarm_id = event.alarm_id
         record.alarmed_at = event.raised_at
+        embedding = self._embedding_for(record)
+        decision = self.clusterer.cluster(record, embedding)
+        record.event_id = decision.event_id
+        record.duplicate_of = decision.duplicate_of
         event.record = record
-        self.store.index_record(record, embedding=self._embedding_for(record))
+        self.store.index_record(record, embedding=embedding)
         self.stats.indexed += 1
 
-        event.channels_notified = self._notify(event)
-        self.broker.publish(RoutingKey.ALARM_RAISED, event.to_message())
+        is_duplicate = bool(decision.duplicate_of)
+        if is_duplicate and not self.settings.alarm_notify_duplicates:
+            event.channels_notified = []
+            self.stats.suppressed += 1
+            log.info(
+                "Tekrar alarm bastırıldı [%s] alarm=%s olay=%s önceki=%s benzerlik=%.2f (%s) | %s",
+                record.source,
+                event.alarm_id,
+                decision.event_id,
+                decision.duplicate_of,
+                decision.similarity,
+                decision.method,
+                title,
+            )
+        else:
+            event.channels_notified = self._notify(event)
+        self.broker.publish(
+            RoutingKey.ALARM_RAISED,
+            event.to_message(),
+            headers={"x-duplicate": is_duplicate, "x-event-id": decision.event_id},
+        )
         self.store.index_alarm(event)
         self.stats.alarms_raised += 1
         log.warning(
-            "Alarm yükseltildi [%s] skor=%d alarm=%s kanallar=%s → %s | %s",
+            "Alarm yükseltildi [%s] skor=%d alarm=%s olay=%s kanallar=%s → %s | %s",
             record.source,
             record.alarm_score,
             event.alarm_id,
-            ",".join(event.channels_notified) or "-",
+            decision.event_id,
+            ",".join(event.channels_notified) or ("bastırıldı" if is_duplicate else "-"),
             Queue.ALARMS,
             title,
         )

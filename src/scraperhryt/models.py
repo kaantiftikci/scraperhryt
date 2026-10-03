@@ -258,6 +258,10 @@ class AlarmEvent(BaseModel):
         doc["@timestamp"] = self.raised_at.isoformat()
         doc["content"] = self.record.content
         doc["category"] = self.record.category
+        doc["event_id"] = self.record.event_id
+        doc["duplicate_of"] = self.record.duplicate_of
+        doc["confidence"] = self.record.confidence
+        doc["needs_review"] = self.record.needs_review
         return doc
 
 
