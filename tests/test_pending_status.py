@@ -129,3 +129,16 @@ def test_ui_has_no_emoji_or_icons_and_shows_news_as_cards() -> None:
         assert not _re.search("[\U0001F300-\U0001FAFF☀-➿←-⇿■-◿]", text), page.name
         assert "<svg" not in text and "<symbol" not in text and 'role="progressbar"' in text
         assert "repeat(3, minmax(0, 1fr))" in text and "aspect-ratio: 1 / 1" in text
+
+
+def test_ask_ui_shows_elapsed_time_and_aborts_after_server_limits() -> None:
+    from fastapi.testclient import TestClient
+
+    from scraperhryt.pipeline.llm import FakeOllama
+    from scraperhryt.reporting.api import create_app
+    from scraperhryt.store import InMemoryStore
+
+    s = Settings(_env_file=None, rag_rewrite_timeout=20, rag_answer_timeout=90)
+    page = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
+    assert "const ASK_LIMIT_MS = 170000;" in page  # 20 + 90 + 60 sn pay
+    assert "signal: ctrl.signal" in page and "Yanıt hazırlanıyor…" in page and "AbortError" in page

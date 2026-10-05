@@ -223,6 +223,7 @@
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
+  const ASK_LIMIT_MS = {{ ((settings.rag_rewrite_timeout + settings.rag_answer_timeout + 60) * 1000) | int }};
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const safeUrl = (u) => /^https?:\/\//i.test(String(u || "")) ? esc(u) : "#";
   /* sunucudaki tr_dt ile aynı biçim: 02.10.2026 22:20 (Türkiye saati) */
@@ -351,15 +352,22 @@
     const question = $("question").value.trim();
     if (!question) return;
     $("ask-btn").disabled = true;
-    $("ask-note").textContent = "Yanıt hazırlanıyor; model haberleri okurken birkaç saniye sürebilir…";
     $("ask-result").innerHTML = "";
+    /* Ollama skorlayıcıyla paylaşıldığından yanıt sürebilir: geçen süre gösterilir, sunucu sınırı aşılınca istek kesilir. */
+    const started = Date.now();
+    const tick = () => { $("ask-note").textContent = `Yanıt hazırlanıyor… ${Math.round((Date.now() - started) / 1000)} sn. Model aynı anda yeni haberleri de skorluyorsa ${Math.round(ASK_LIMIT_MS / 60000)} dk'ya kadar sürebilir.`; };
+    tick();
+    const ticker = setInterval(tick, 1000);
+    const ctrl = new AbortController();
+    const limit = setTimeout(() => ctrl.abort(), ASK_LIMIT_MS);
     try {
-      const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("ask-days").value) || undefined }) });
+      const r = await fetch("/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("ask-days").value) || undefined }) });
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const answer = await r.json();
-      let note = `${answer.retrieved_count} haber · model ${answer.model}`;
+      const secs = Math.round((Date.now() - started) / 1000);
+      let note = `${answer.retrieved_count} haber · model ${answer.model} · ${secs} sn`;
       if (!answer.retrieved_count) note = "Bu süre içinde soruyla eşleşen haber bulunamadı.";
-      else if (answer.model === "fallback") note += " · cevap haberlerin metninden doğrudan derlendi";
+      else if (answer.model === "fallback") note = `${answer.retrieved_count} haber · ${secs} sn · model yanıt vermediği için cevap haberlerin metninden doğrudan derlendi`;
       $("ask-note").textContent = note;
       const timeline = (answer.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${esc(t.citation)}] ` : ""}${esc(t.event)}</li>`).join("");
       const sources = (answer.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${safeUrl(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
@@ -367,8 +375,15 @@
         (sources ? `<details class="sources"><summary>Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
           (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi · eskiden yeniye</h2><ol class="timeline">${timeline}</ol>` : "") +
           `<h2 class="small" style="margin-top:10px">Kaynaklar</h2><ol class="srcs">${sources}</ol></details>` : "") + `</article>`;
-    } catch (e) { $("ask-note").textContent = "Soru yanıtlanamadı: " + e.message; }
-    finally { $("ask-btn").disabled = false; }
+    } catch (e) {
+      $("ask-note").textContent = e.name === "AbortError"
+        ? `Yanıt ${Math.round(ASK_LIMIT_MS / 1000)} sn içinde gelmedi; model meşgul olabilir. Biraz sonra yeniden deneyin.`
+        : "Soru yanıtlanamadı: " + e.message;
+    } finally {
+      clearInterval(ticker);
+      clearTimeout(limit);
+      $("ask-btn").disabled = false;
+    }
   }
   $("ask-form").addEventListener("submit", ask);
 

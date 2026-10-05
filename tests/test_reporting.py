@@ -322,6 +322,33 @@ def test_qa_engine_fallback_when_llm_unavailable(settings: Settings, seeded) -> 
     assert answer.search_terms == ["özgür", "özel", "kemal", "kılıçdaroğlu"]
 
 
+def test_qa_engine_bounds_ollama_waits_and_falls_back_on_timeout(seeded) -> None:
+    """Ollama skorlayıcıyla meşgulken soru sonsuza dek beklemez: her çağrı kendi süre sınırıyla gider,
+    yanıt üretimi zaman aşımına uğrarsa haber metninden çıkarımsal yanıt döner."""
+    import json
+
+    import httpx
+
+    from scraperhryt.pipeline.llm import OllamaClient
+
+    store, records, _ = seeded
+    s = Settings(_env_file=None, rag_top_k=12, rag_rewrite_timeout=7.0, rag_answer_timeout=11.0)
+    waits: dict[str, float] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        waits[request.url.path] = request.extensions["timeout"]["read"]
+        if request.url.path == "/api/generate":
+            raise httpx.ReadTimeout("timed out", request=request)
+        content = json.dumps({"search_terms": ["Özgür Özel", "Kılıçdaroğlu"], "entities": ["Özgür Özel"]}, ensure_ascii=False)
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": content}, "done": True})
+
+    with OllamaClient(s, transport=httpx.MockTransport(handler)) as llm:
+        answer = QAEngine(s, store, llm).ask(QUESTION)
+    assert waits == {"/api/chat": 7.0, "/api/generate": 11.0}
+    assert answer.model == FALLBACK_MODEL and answer.sources[0].id == records["newest"].id
+    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer
+
+
 def test_qa_engine_fallback_when_rewrite_is_bad_json(settings: Settings, seeded) -> None:
     store, records, _ = seeded
 

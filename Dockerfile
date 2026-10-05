@@ -17,14 +17,16 @@ RUN groupadd --gid 1000 app \
 
 WORKDIR /app
 
-# 1) Bağımlılıkları ayrı katmanda kur (kaynak değişince yeniden indirilmesin).
-COPY pyproject.toml README.md ./
+# 1) Bağımlılıkları ayrı katmanda kur (kaynak ya da README değişince yeniden indirilmesin): yalnızca
+#    pyproject.toml kopyalanır; paket meta verisinin istediği README.md bu katmanda boş bir yer tutucudur.
+COPY pyproject.toml ./
 RUN mkdir -p src/scraperhryt \
-    && touch src/scraperhryt/__init__.py \
+    && touch src/scraperhryt/__init__.py README.md \
     && pip install . \
-    && rm -rf src build
+    && rm -rf src build README.md
 
-# 2) Gerçek kaynak kodu ve betikler.
+# 2) Gerçek kaynak kodu, README ve betikler.
+COPY README.md ./
 COPY src ./src
 COPY scripts ./scripts
 # Eş anlamlılar, ön sınıflandırıcı örnekleri, altın set ve RAG değerlendirme seti (KEYWORD_ALIASES_PATH vb.).

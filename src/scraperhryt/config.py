@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     report_digest_minutes: int = 30    # ... veya en son özetten bu kadar dakika geçince
     rag_top_k: int = 12
     rag_recency_days: int = 14
+    # Soru-cevap süre sınırları (sn). Ollama skorlayıcıyla paylaşıldığından istek kuyrukta bekleyebilir; sınır
+    # aşılınca yeniden yazma yerine soru sözcükleri, model yanıtı yerine haber metninden çıkarımsal yanıt kullanılır.
+    rag_rewrite_timeout: float = 20.0
+    rag_answer_timeout: float = 90.0
     rag_hybrid: bool = True  # embedding modeli ayarlıysa BM25 + kNN (RRF) birleşik arama
     rag_eval_path: str = "config/rag_eval.jsonl"
     # Ani artış (burst) tespiti: aynı konu/varlık için pencere içinde en az N alarm → burst raporu

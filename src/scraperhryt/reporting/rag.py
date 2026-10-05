@@ -231,7 +231,10 @@ class QAEngine:
             return fallback, []
         try:
             data = self.llm.chat_json(
-                QUERY_REWRITE_SYSTEM_PROMPT, build_query_rewrite_prompt(question), temperature=0.0
+                QUERY_REWRITE_SYSTEM_PROMPT,
+                build_query_rewrite_prompt(question),
+                temperature=0.0,
+                timeout=self.settings.rag_rewrite_timeout,
             )
         except LLMError as exc:
             log.warning("Sorgu yeniden yazılamadı, soru sözcükleri kullanılacak: %s", exc)
@@ -376,7 +379,7 @@ class QAEngine:
             return fallback()
         user = build_rag_user_prompt(question, blocks, since_days=since_days)
         try:
-            text = normalize_ws(self.llm.generate_text(RAG_SYSTEM_PROMPT, user))
+            text = normalize_ws(self.llm.generate_text(RAG_SYSTEM_PROMPT, user, timeout=self.settings.rag_answer_timeout))
         except LLMError as exc:
             log.warning("LLM yanıt üretemedi; haberlerden çıkarımsal yedek yanıt derlenecek: %s", exc)
             return fallback(str(exc))
