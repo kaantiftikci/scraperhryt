@@ -120,11 +120,12 @@ def test_runner_reports_live_progress_and_status_exposes_it(tmp_path: Path) -> N
     assert status["running"] is True and status["progress"]["source"] in ("", "hurriyet") and status["stale"] is False
 
 
-def test_ui_has_no_emoji_and_uses_svg_icons() -> None:
+def test_ui_has_no_emoji_or_icons_and_shows_news_as_cards() -> None:
     import re as _re
 
     root = Path(__file__).resolve().parents[1] / "src" / "scraperhryt" / "reporting" / "templates"
     for page in root.glob("*.html"):
         text = page.read_text(encoding="utf-8")
         assert not _re.search("[\U0001F300-\U0001FAFF☀-➿←-⇿■-◿]", text), page.name
-        assert "<symbol id=" in text and 'role="progressbar"' in text
+        assert "<svg" not in text and "<symbol" not in text and 'role="progressbar"' in text
+        assert "repeat(3, minmax(0, 1fr))" in text and "aspect-ratio: 1 / 1" in text

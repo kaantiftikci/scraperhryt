@@ -1030,7 +1030,7 @@ def test_api_dashboard_renders_html(client) -> None:
 
 def test_api_dashboard_shows_error_when_store_fails(settings: Settings) -> None:
     class BrokenStore(InMemoryStore):
-        def stats(self, since: datetime | None, until: datetime | None = None) -> dict[str, Any]:
+        def recent_alarms(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             raise RuntimeError("ES çöktü")
 
     http = TestClient(create_app(settings, BrokenStore(), FakeOllama()))

@@ -42,13 +42,11 @@ from ..store import ArticleStore, SearchHit
 from ..textutil import excerpt
 from .builder import ReportBuilder
 from .prompts import (
-    alarm_ratio_text,
     flat_text,
     format_tr,
     kind_label,
     one_line_reason,
     parse_datetime,
-    peak_hour,
     to_aware,
 )
 from .rag import QAEngine, make_snippet
@@ -552,38 +550,16 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard(request: Request) -> HTMLResponse:
-        now = utcnow()
-        since = now - timedelta(hours=DASHBOARD_HOURS)
         error: str | None = None
-        data: Mapping[str, Any] = {}
         alarms: list[dict[str, Any]] = []
         reports: list[dict[str, Any]] = []
         try:
-            data = store.stats(since, now)
             alarms = [_alarm_view(doc) for doc in store.recent_alarms(size=DASHBOARD_ALARMS)]
             reports = [_report_view(doc) for doc in store.list_reports(size=DASHBOARD_REPORTS)]
         except Exception as exc:
-            log.error("Pano verisi alınamadı: %s", exc)
+            log.error("Arayüz verisi alınamadı: %s", exc)
             error = f"Veri alınamadı: {type(exc).__name__}: {exc}"
-        context = {
-            "settings": settings,
-            "model": llm.model_name,
-            "hours": DASHBOARD_HOURS,
-            "now": now,
-            "stats": data,
-            "total": _as_int(data.get("total")),
-            "alarm_count": _as_int(data.get("alarms")),
-            "alarm_ratio": alarm_ratio_text(_as_int(data.get("total")), _as_int(data.get("alarms"))),
-            "avg_score": data.get("avg_alarm_score") if _as_int(data.get("alarms")) else None,
-            "peak": peak_hour(data.get("by_hour")),
-            "by_source": _sorted_counts(data.get("by_source")),
-            "by_keyword": _sorted_counts(data.get("by_keyword")),
-            "by_category": _sorted_counts(data.get("by_category")),
-            "alarms": alarms,
-            "reports": reports,
-            "error": error,
-            "version": __version__,
-        }
+        context = {"settings": settings, "alarms": alarms, "reports": reports, "error": error}
         return templates.TemplateResponse(request, "app.html", context)
 
     return app
@@ -628,14 +604,6 @@ def _report_view(doc: Mapping[str, Any]) -> dict[str, Any]:
         "alarms": _as_int(stats.get("alarms")),
         "top_alarm_count": len(top),
     }
-
-
-def _sorted_counts(mapping: Any, limit: int = 12) -> list[tuple[str, int]]:
-    if not isinstance(mapping, Mapping):
-        return []
-    items = [(str(k), _as_int(v)) for k, v in mapping.items()]
-    items.sort(key=lambda kv: (-kv[1], kv[0]))
-    return items[:limit]
 
 
 def _safe_bool(fn: Callable[[], bool], what: str) -> bool:

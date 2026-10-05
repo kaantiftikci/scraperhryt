@@ -588,7 +588,7 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 
 Tek sayfa: `http://localhost:8000/` (Docker'da `API_PORT` ile değiştirilebilir; eski `/ara` adresi buraya yönlenir).
 
-- **Durum şeridi:** son ve sonraki tarama, çekilemeyen (bekleyen) haberler ve uyarılar. Tarama sürerken canlı ilerleme çubuğu kaynağı, aşamayı ve yüzdeyi gösterir; turlar arasında çubuk sonraki taramaya kalan süreyi doldurur.
-- **Son 24 saat:** haber ve alarm sayısı, ortalama alarm skoru, en yoğun saat; kaynak, anahtar kelime ve kategori dağılımı.
+- **Durum şeridi:** son tarama, sonraki taramaya kalan süre, çekilemeyen (bekleyen) haberler ve uyarılar. Tarama sürerken canlı ilerleme çubuğu kaynağı, aşamayı ve yüzdeyi gösterir; turlar arasında çubuk sonraki taramaya kalan süreyi doldurur.
 - **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar (Doğru / Yanlış / Belirsiz geri bildirimi), Raporlar.
-- İkonlar satır içi SVG'dir; açık ve koyu tema ile telefon genişliği desteklenir.
+- Haberler ve alarmlar kare kartlarda gösterilir: geniş ekranda satırda üç, tablette iki, telefonda bir kart. Açık ve koyu tema desteklenir; ikon ve emoji kullanılmaz.
+- Sayısal özetler arayüzde değil API'de: `GET /stats?hours=24` (kaynak, anahtar kelime, kategori ve saatlik dağılım).

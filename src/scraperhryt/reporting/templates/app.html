@@ -7,10 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <style>
-    /* Tek sütunlu izleme ekranı: durum şeridi (canlı ilerleme), son 24 saat özeti, ardından Ara / Soru sor / Alarmlar / Raporlar. */
+    /* Tek sayfa: durum şeridi (canlı ilerleme), ardından Ara / Soru sor / Alarmlar / Raporlar. Haberler satırda üç kare kart. */
     :root {
       --bg: #f3f5f7; --card: #ffffff; --ink: #172028; --muted: #5b6670; --line: #d9dee3; --track: #e6eaee;
-      --accent: #0e7c86; --accent-ink: #ffffff; --bar: #0e7c86;
+      --accent: #0e7c86; --accent-ink: #ffffff;
       --critical: #b42318; --important: #b54708; --notable: #8a6d00; --ok: #1a7f4b; --mark: #ffe58a;
       --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --font-display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
@@ -18,24 +18,22 @@
     }
     @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
       --bg: #0f1418; --card: #161c22; --ink: #e6ebef; --muted: #9aa7b2; --line: #2a333c; --track: #222a32;
-      --accent: #4fc1cc; --accent-ink: #0b1b1e; --bar: #4fc1cc;
+      --accent: #4fc1cc; --accent-ink: #0b1b1e;
       --critical: #ff7a6e; --important: #f2a65a; --notable: #e3c35a; --ok: #5ccf8a; --mark: #6b5a12; color-scheme: dark;
     } }
     :root[data-theme="dark"] {
       --bg: #0f1418; --card: #161c22; --ink: #e6ebef; --muted: #9aa7b2; --line: #2a333c; --track: #222a32;
-      --accent: #4fc1cc; --accent-ink: #0b1b1e; --bar: #4fc1cc;
+      --accent: #4fc1cc; --accent-ink: #0b1b1e;
       --critical: #ff7a6e; --important: #f2a65a; --notable: #e3c35a; --ok: #5ccf8a; --mark: #6b5a12; color-scheme: dark;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; }
     body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); padding-block: 0 48px; padding-inline: 16px; }
     a { color: var(--accent); }
-    .icon { width: 1em; height: 1em; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.125em; }
-    .wrap { max-width: 920px; margin: 0 auto; display: grid; gap: 18px; }
-    header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-block: 20px 0; }
+    .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+    header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-block: 20px 0; }
     header.top h1 { font: 600 26px/1.2 var(--font-display); margin: 0; }
-    header.top nav { display: flex; gap: 14px; align-items: center; font-size: 13px; color: var(--muted); }
-    header.top nav a { display: inline-flex; gap: 6px; align-items: center; text-decoration: none; font-size: 14px; }
+    header.top a { font-size: 14px; text-decoration: none; }
     h2.small { font: 500 12px var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0; }
 
     /* durum şeridi + ilerleme çubuğu */
@@ -43,186 +41,123 @@
     .status[data-level="warn"] { border-left-color: var(--important); }
     .status[data-level="alarm"] { border-left-color: var(--critical); }
     .status[data-level="running"] { border-left-color: var(--accent); }
-    .status-head { display: flex; gap: 10px; align-items: flex-start; }
-    .status-icon { font-size: 18px; margin-top: 1px; color: var(--ok); }
-    .status[data-level="warn"] .status-icon { color: var(--important); }
-    .status[data-level="alarm"] .status-icon { color: var(--critical); }
-    .status[data-level="running"] .status-icon { color: var(--accent); }
-    .status .row { display: flex; gap: 6px 16px; flex-wrap: wrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .status-head { display: flex; gap: 4px 16px; justify-content: space-between; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+    .status .row { display: flex; gap: 4px 14px; flex-wrap: wrap; color: var(--muted); }
     .status .row strong { color: var(--ink); font-weight: 500; }
     .progress { position: relative; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
     .progress-fill { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--accent); border-radius: 3px; transition: width .6s ease; }
     .progress[data-mode="waiting"] .progress-fill { background: var(--muted); opacity: .45; }
     .progress[data-mode="indeterminate"] .progress-fill { width: 30%; animation: slide 1.4s ease-in-out infinite; }
     @keyframes slide { 0% { left: -30%; } 100% { left: 100%; } }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .status[data-level="running"] .status-icon { animation: spin 1.6s linear infinite; }
     @media (prefers-reduced-motion: reduce) {
       .progress[data-mode="indeterminate"] .progress-fill { animation: none; width: 100%; opacity: .5; }
-      .status[data-level="running"] .status-icon { animation: none; }
       .progress-fill { transition: none; }
     }
-    .progress-label { font: 12px var(--font-data); color: var(--muted); font-variant-numeric: tabular-nums; }
-    .status .msg { color: var(--ink); }
-    .status details summary { cursor: pointer; color: var(--accent); font-size: 13px; display: inline-flex; gap: 4px; align-items: center; list-style: none; }
-    .status details summary::-webkit-details-marker, details.filters summary::-webkit-details-marker { display: none; }
-    details[open] > summary .chev { transform: rotate(90deg); }
-    .chev { transition: transform .15s; }
+    .progress-label { font: 12px var(--font-data); color: var(--muted); }
+    .status .msg { color: var(--ink); margin: 0; }
+    .status details summary { cursor: pointer; color: var(--accent); font-size: 13px; }
     .status ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
     .status ul a { color: var(--ink); text-decoration: none; }
-
-    /* özet */
-    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 8px; }
-    .tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 2px; }
-    .tile .label { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
-    .tile .value { font: 600 26px/1.15 var(--font-data); font-variant-numeric: tabular-nums; }
-    .tile .sub { font-size: 12px; color: var(--muted); }
-    .dists { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
-    .dist { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
-    .dist ol { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
-    .dist li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; font-size: 13px; }
-    .dist .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .dist .num { font: 12px var(--font-data); color: var(--muted); font-variant-numeric: tabular-nums; }
-    .dist .bar { grid-column: 1 / -1; height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
-    .dist .bar span { display: block; height: 100%; background: var(--bar); border-radius: 0 3px 3px 0; }
-    .empty { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); font-size: 14px; margin: 0; }
     .error { padding: 10px 14px; border: 1px solid var(--critical); border-radius: 8px; color: var(--critical); background: var(--card); margin: 0; }
 
-    /* sekmeler */
+    /* sekmeler ve formlar */
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-    .tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 10px 14px; font: 500 15px var(--font-body); color: var(--muted); cursor: pointer; display: inline-flex; gap: 7px; align-items: center; white-space: nowrap; }
+    .tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 10px 14px; font: 500 15px var(--font-body); color: var(--muted); cursor: pointer; white-space: nowrap; }
     .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-    .tabs .count { font: 12px var(--font-data); color: var(--muted); }
-    .tabs button:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .tabs .count { font: 12px var(--font-data); color: var(--muted); margin-left: 4px; }
+    .tabs button:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .panel { display: grid; gap: 12px; }
     .panel[hidden] { display: none; }
     form.bar { display: grid; gap: 10px; }
     .field { display: grid; gap: 4px; min-width: 0; }
     label { font-size: 12px; color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase; }
-    input, select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); font: inherit; min-width: 0; }
+    input, select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); font: inherit; min-width: 0; height: 44px; }
     .main-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
-    button.primary { display: inline-flex; gap: 8px; align-items: center; justify-content: center; padding: 10px 18px; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; cursor: pointer; font: 600 15px var(--font-body); }
+    button.primary { padding: 10px 20px; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; cursor: pointer; font: 600 15px var(--font-body); }
     button.primary:disabled { opacity: .6; cursor: progress; }
-    details.filters summary { cursor: pointer; font-size: 13px; color: var(--accent); list-style: none; display: inline-flex; gap: 4px; align-items: center; }
+    details.filters summary { cursor: pointer; font-size: 13px; color: var(--accent); }
     .filters-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; align-items: end; }
     .note { color: var(--muted); font-size: 14px; min-height: 1.4em; margin: 0; font-variant-numeric: tabular-nums; }
-    .list { display: grid; gap: 10px; }
-    article.item { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 6px; min-width: 0; }
-    article.item.alarm { border-left: 4px solid var(--critical); }
-    article.item h3 { margin: 0; font: 600 17px/1.3 var(--font-body); text-wrap: balance; }
-    article.item h3 a { color: var(--ink); text-decoration: none; }
-    article.item h3 a:hover { text-decoration: underline; }
-    .meta { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; font: 13px var(--font-data); color: var(--muted); }
-    .badge, .chip { display: inline-flex; gap: 4px; align-items: center; padding: 1px 8px; border-radius: 999px; font: 500 12px var(--font-data); border: 1px solid var(--line); color: var(--muted); }
+
+    /* haber kartları: satırda üç kare */
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .grid > .empty { grid-column: 1 / -1; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; aspect-ratio: 1 / 1; align-self: stretch; }
+    .card.alarm { border-top: 3px solid var(--critical); }
+    .card .meta { display: flex; gap: 8px; justify-content: space-between; align-items: center; font: 12px var(--font-data); color: var(--muted); }
+    .card .meta .when { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card h3 { margin: 0; font: 600 17px/1.35 var(--font-body); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+    .card h3 a { color: var(--ink); text-decoration: none; }
+    .card h3 a:hover { text-decoration: underline; }
+    .card .text { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
+    .card .reason { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--critical) 7%, transparent); font-size: 14px; }
+    .card .reason p { margin: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+    .card .foot { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .badge, .chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font: 500 12px var(--font-data); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
     .badge.critical { color: var(--critical); border-color: var(--critical); }
     .badge.important { color: var(--important); border-color: var(--important); }
     .badge.notable { color: var(--notable); border-color: var(--notable); }
     .badge.routine { color: var(--ok); border-color: var(--ok); }
     .chip.kw { color: var(--accent); border-color: var(--accent); }
     .chip.review { color: var(--important); border-color: var(--important); }
-    .text { margin: 0; max-width: 70ch; }
-    .text.sub { color: var(--muted); }
     mark { background: var(--mark); color: inherit; padding: 0 2px; border-radius: 3px; }
-    .reason { margin: 2px 0 0; padding: 8px 12px; border-left: 3px solid var(--critical); background: color-mix(in srgb, var(--critical) 7%, transparent); border-radius: 6px; font-size: 14px; white-space: pre-wrap; max-width: 70ch; }
-    .fb { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
-    .fb button { display: inline-flex; gap: 5px; align-items: center; padding: 4px 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; cursor: pointer; font: 500 13px var(--font-body); }
+    .fb { display: flex; gap: 6px; flex-wrap: wrap; }
+    .fb button { padding: 4px 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; cursor: pointer; font: 500 13px var(--font-body); }
     .fb button:hover { border-color: var(--accent); }
     .fb button:disabled { opacity: .7; cursor: default; }
-    .answer { white-space: pre-wrap; max-width: 70ch; margin: 0; }
-    details.sources > summary { cursor: pointer; color: var(--accent); list-style: none; display: inline-flex; gap: 4px; align-items: center; }
+
+    /* soru cevabı ve raporlar: tam genişlik */
+    .block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
+    .answer { white-space: pre-wrap; max-width: 75ch; margin: 0; }
+    details.sources > summary { cursor: pointer; color: var(--accent); }
     ol.timeline, ol.srcs { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
     .tdate { font: 12px var(--font-data); color: var(--muted); margin-right: 6px; }
-    .report .narrative { white-space: pre-wrap; margin: 0; max-width: 72ch; }
-    @media (max-width: 480px) {
-      header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; } .tile .value { font-size: 22px; }
+    .block .meta { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; font: 13px var(--font-data); color: var(--muted); }
+    .narrative { white-space: pre-wrap; margin: 0; max-width: 75ch; }
+
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 600px) {
+      .grid { grid-template-columns: minmax(0, 1fr); }
+      .card { aspect-ratio: auto; }
+      header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; }
       .tabs button { padding: 10px 9px; font-size: 14px; } .tabs .count { display: none; }
-      .dist ol { gap: 4px; } .dists { gap: 8px; }
     }
   </style>
 </head>
 <body>
-<svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
-  <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
-  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
-  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></symbol>
-  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
-  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
-  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
-  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
-  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 5l7 7-7 7"/></symbol>
-  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
-  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></symbol>
-  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
-  <symbol id="i-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
-  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
-  <symbol id="i-news" viewBox="0 0 24 24"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-4 0V11h4"/><path d="M10 6h8M10 10h8M10 14h5"/></symbol>
-  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M12 14 16 10"/><path d="M3.3 19a10 10 0 1 1 17.4 0z"/></symbol>
-  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
-  <symbol id="i-link" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
-</svg>
-
 <div class="wrap">
   <header class="top">
     <h1>Haber Radarı</h1>
-    <nav>
-      <span>model {{ model }} · v{{ version }}</span>
-      <a href="/docs"><svg class="icon"><use href="#i-code"/></svg>API</a>
-    </nav>
+    <a href="/docs">API</a>
   </header>
 
   <section class="status" id="status" data-level="ok" aria-live="polite">
     <div class="status-head">
-      <svg class="icon status-icon" id="status-icon"><use href="#i-clock"/></svg>
       <div class="row" id="status-row"><span>Kazıyıcı durumu yükleniyor…</span></div>
+      <div class="progress-label" id="progress-label"></div>
     </div>
     <div class="progress" id="progress" data-mode="indeterminate" role="progressbar" aria-label="Kazıma turu" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progress-fill"></div></div>
-    <div class="progress-label" id="progress-label"></div>
-    <div class="msg" id="status-msg" hidden></div>
-    <details id="pending-box" hidden><summary><svg class="icon chev"><use href="#i-chevron"/></svg><span id="pending-summary">Çekilemeyen haberler</span></summary><ul id="pending-list"></ul></details>
+    <p class="msg" id="status-msg" hidden></p>
+    <details id="pending-box" hidden><summary id="pending-summary">Çekilemeyen haberler</summary><ul id="pending-list"></ul></details>
   </section>
 
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
-  <section aria-labelledby="h-overview">
-    <h2 class="small" id="h-overview">Son {{ hours }} saat</h2>
-    <div class="tiles">
-      <div class="tile"><span class="label"><svg class="icon"><use href="#i-news"/></svg>Haber</span><span class="value">{{ total }}</span><span class="sub">kaydedilen haber</span></div>
-      <div class="tile"><span class="label"><svg class="icon"><use href="#i-bell"/></svg>Alarm</span><span class="value">{{ alarm_count }}</span><span class="sub">haberlerin {{ alarm_ratio }}'i</span></div>
-      <div class="tile"><span class="label"><svg class="icon"><use href="#i-gauge"/></svg>Ortalama alarm skoru</span><span class="value">{{ (avg_score | round | int) if avg_score is not none else "-" }}</span><span class="sub">0-100 ölçeği</span></div>
-      <div class="tile"><span class="label"><svg class="icon"><use href="#i-pulse"/></svg>En yoğun saat</span><span class="value">{{ (peak.ts | tr_dt)[-5:] if peak else "-" }}</span><span class="sub">{{ (peak.count ~ " haber") if peak else "veri yok" }}</span></div>
-    </div>
-    <div class="dists">
-      {% for title, rows in [("Kaynak", by_source), ("Anahtar kelime", by_keyword), ("Kategori", by_category)] %}
-      <div class="dist">
-        <h2 class="small">{{ title }}</h2>
-        {% if rows %}
-        {% set top = rows[0][1] or 1 %}
-        <ol>
-          {% for name, count in rows[:6] %}
-          <li title="{{ name }}: {{ count }}"><span class="name">{{ name }}</span><span class="num">{{ count }}</span><span class="bar"><span style="width: {{ (count * 100 / top) | round(1) }}%"></span></span></li>
-          {% endfor %}
-        </ol>
-        {% else %}<p class="empty">Henüz veri yok.</p>{% endif %}
-      </div>
-      {% endfor %}
-    </div>
-  </section>
-
   <div class="tabs" role="tablist">
-    <button role="tab" id="tab-search" aria-selected="true" data-tab="search"><svg class="icon"><use href="#i-search"/></svg>Ara</button>
-    <button role="tab" id="tab-ask" aria-selected="false" data-tab="ask"><svg class="icon"><use href="#i-message"/></svg>Soru sor</button>
-    <button role="tab" id="tab-alarms" aria-selected="false" data-tab="alarms"><svg class="icon"><use href="#i-bell"/></svg>Alarmlar <span class="count">{{ alarms | length }}</span></button>
-    <button role="tab" id="tab-reports" aria-selected="false" data-tab="reports"><svg class="icon"><use href="#i-file"/></svg>Raporlar <span class="count">{{ reports | length }}</span></button>
+    <button role="tab" id="tab-search" aria-selected="true" data-tab="search">Ara</button>
+    <button role="tab" id="tab-ask" aria-selected="false" data-tab="ask">Soru sor</button>
+    <button role="tab" id="tab-alarms" aria-selected="false" data-tab="alarms">Alarmlar<span class="count">{{ alarms | length }}</span></button>
+    <button role="tab" id="tab-reports" aria-selected="false" data-tab="reports">Raporlar<span class="count">{{ reports | length }}</span></button>
   </div>
 
   <section class="panel" id="panel-search" role="tabpanel" aria-labelledby="tab-search">
     <form class="bar" id="search-form">
       <div class="main-row">
         <div class="field"><label for="q">Arama</label><input id="q" name="q" placeholder="fon soruşturması, Özgür Özel, bakan açıklaması…"></div>
-        <button class="primary" type="submit"><svg class="icon"><use href="#i-search"/></svg>Ara</button>
+        <button class="primary" type="submit">Ara</button>
       </div>
-      <details class="filters"><summary><svg class="icon chev"><use href="#i-chevron"/></svg>Filtreler</summary>
+      <details class="filters"><summary>Filtreler</summary>
         <div class="filters-grid">
           <div class="field"><label for="source">Kaynak</label><select id="source"><option value="">Tümü</option><option value="hurriyet">Hürriyet</option><option value="12punto">12punto</option></select></div>
           <div class="field"><label for="since">Son N gün</label><input id="since" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div>
@@ -231,21 +166,21 @@
       </details>
     </form>
     <p class="note" id="search-note">En yeni haberler yükleniyor…</p>
-    <div class="list" id="results"></div>
+    <div class="grid" id="results"></div>
   </section>
 
   <section class="panel" id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden>
     <form class="bar" id="ask-form">
       <div class="main-row">
         <div class="field"><label for="question">Soru</label><input id="question" placeholder="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" minlength="2" required></div>
-        <button class="primary" type="submit" id="ask-btn"><svg class="icon"><use href="#i-arrow"/></svg>Sor</button>
+        <button class="primary" type="submit" id="ask-btn">Sor</button>
       </div>
-      <details class="filters"><summary><svg class="icon chev"><use href="#i-chevron"/></svg>Filtreler</summary>
+      <details class="filters"><summary>Filtreler</summary>
         <div class="filters-grid"><div class="field"><label for="ask-days">Son N gün</label><input id="ask-days" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div></div>
       </details>
     </form>
     <p class="note" id="ask-note">Cevap, en yeni haberlerin tam metnine dayanır; kaynaklar cevabın altında açılır.</p>
-    <div class="list" id="ask-result"></div>
+    <div id="ask-result"></div>
   </section>
 
   <section class="panel" id="panel-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
@@ -253,34 +188,35 @@
       <div class="filters-grid">
         <div class="field"><label for="alarm-hours">Son N saat</label><input id="alarm-hours" type="number" min="1" max="8760" value="48"></div>
         <div class="field"><label for="alarm-dups">Tekrarlar</label><select id="alarm-dups"><option value="false">Gizle</option><option value="true">Göster</option></select></div>
-        <div class="field"><button class="primary" type="submit"><svg class="icon"><use href="#i-refresh"/></svg>Yenile</button></div>
+        <div class="field"><button class="primary" type="submit">Yenile</button></div>
       </div>
     </form>
     <p class="note" id="alarm-note">{{ alarms | length }} alarm</p>
-    <div class="list" id="alarms">
+    <div class="grid" id="alarms">
       {% for a in alarms %}
-      <article class="item alarm">
+      <article class="card alarm">
+        <div class="meta"><span class="when">{{ a.source }} · {{ a.published_at | tr_dt }}</span><span class="badge {{ a.alarm_score | score_class }}">skor {{ a.alarm_score }}</span></div>
         <h3><a href="{{ a.content_url }}" target="_blank" rel="noopener">{{ a.title }}</a></h3>
-        <div class="meta"><span>{{ a.source }}</span><span>{{ a.published_at | tr_dt }}</span><span class="badge {{ a.alarm_score | score_class }}">skor {{ a.alarm_score }}</span>{% for k in a.matched_keywords %}<span class="chip kw">{{ k }}</span>{% endfor %}{% if a.needs_review %}<span class="chip review"><svg class="icon"><use href="#i-alert"/></svg>inceleme</span>{% endif %}</div>
-        {% if a.reason %}<div class="reason">{{ a.reason }}</div>{% endif %}
-        {% if a.alarm_id %}<div class="fb"><span>Bu alarm doğru mu?</span>
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="true_positive"><svg class="icon"><use href="#i-check"/></svg>Doğru</button>
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="false_positive"><svg class="icon"><use href="#i-x"/></svg>Yanlış</button>
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="needs_context"><svg class="icon"><use href="#i-help"/></svg>Belirsiz</button></div>{% endif %}
+        {% if a.reason %}<div class="reason"><p>{{ a.reason }}</p></div>{% endif %}
+        <div class="foot">
+          {% for k in a.matched_keywords[:3] %}<span class="chip kw">{{ k }}</span>{% endfor %}{% if a.needs_review %}<span class="chip review">inceleme</span>{% endif %}
+        </div>
+        {% if a.alarm_id %}<div class="fb" role="group" aria-label="Bu alarm doğru mu?">
+          <button type="button" data-id="{{ a.alarm_id }}" data-label="true_positive">Doğru</button>
+          <button type="button" data-id="{{ a.alarm_id }}" data-label="false_positive">Yanlış</button>
+          <button type="button" data-id="{{ a.alarm_id }}" data-label="needs_context">Belirsiz</button></div>{% endif %}
       </article>
       {% else %}<p class="empty">Henüz alarm yok. Haberler skorlandıkça burada görünecek.</p>{% endfor %}
     </div>
   </section>
 
   <section class="panel" id="panel-reports" role="tabpanel" aria-labelledby="tab-reports" hidden>
-    <div class="list">
-      {% for r in reports %}
-      <article class="item report">
-        <div class="meta"><span class="chip">{{ r.kind | kind_label }}</span><span>{{ r.window_start | tr_dt }} – {{ r.window_end | tr_dt }}</span><span>{{ r.total }} haber · {{ r.alarms }} alarm</span><span>{{ r.kind }}</span></div>
-        {% if r.narrative %}<p class="narrative">{{ r.narrative }}</p>{% endif %}
-      </article>
-      {% else %}<p class="empty">Henüz rapor yok. Raporlama katmanı saatlik ve alarm özeti raporları üretir.</p>{% endfor %}
-    </div>
+    {% for r in reports %}
+    <article class="block">
+      <div class="meta"><span class="chip">{{ r.kind | kind_label }}</span><span>{{ r.window_start | tr_dt }} – {{ r.window_end | tr_dt }}</span><span>{{ r.total }} haber · {{ r.alarms }} alarm</span></div>
+      {% if r.narrative %}<p class="narrative">{{ r.narrative }}</p>{% endif %}
+    </article>
+    {% else %}<p class="empty">Henüz rapor yok. Raporlama katmanı saatlik ve alarm özeti raporları üretir.</p>{% endfor %}
   </section>
 </div>
 
@@ -289,17 +225,24 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const safeUrl = (u) => /^https?:\/\//i.test(String(u || "")) ? esc(u) : "#";
-  const icon = (name) => `<svg class="icon"><use href="#i-${name}"/></svg>`;
-  const fmtDate = (iso) => { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? esc(iso) : d.toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }); };
-  const fmtTime = (iso) => { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? "-" : d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }); };
+  /* sunucudaki tr_dt ile aynı biçim: 02.10.2026 22:20 (Türkiye saati) */
+  const trParts = new Intl.DateTimeFormat("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const fmtDate = (iso) => {
+    if (!iso) return "-";
+    const d = new Date(iso);
+    if (isNaN(d)) return esc(iso);
+    const p = Object.fromEntries(trParts.formatToParts(d).map((x) => [x.type, x.value]));
+    return `${p.day}.${p.month}.${p.year} ${p.hour}:${p.minute}`;
+  };
   const ago = (sec) => sec == null ? "-" : sec < 90 ? `${sec} sn önce` : sec < 5400 ? `${Math.round(sec / 60)} dk önce` : `${Math.round(sec / 3600)} sa önce`;
   const scoreClass = (s) => s >= 80 ? "critical" : s >= 60 ? "important" : s >= 30 ? "notable" : "routine";
+  const chips = (kws) => (kws || []).slice(0, 3).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("");
   const highlight = (text, q) => {
-    let out = esc(text || "");
-    (q || "").split(/\s+/).filter((w) => w.length > 2).forEach((w) => {
-      out = out.replace(new RegExp("(" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*)", "giu"), "<mark>$1</mark>");
-    });
-    return out;
+    const raw = String(text || "");
+    const words = (q || "").split(/\s+/).filter((w) => w.length > 2).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    if (!words.length) return esc(raw);
+    const re = new RegExp("((?:" + words.join("|") + ")[\\p{L}\\p{N}]*)", "giu");
+    return raw.split(re).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join("");
   };
 
   /* sekmeler */
@@ -314,7 +257,7 @@
     const bar = $("progress");
     bar.dataset.mode = mode;
     $("progress-fill").style.width = mode === "indeterminate" ? "" : `${Math.max(0, Math.min(100, pct))}%`;
-    if (mode === "indeterminate") bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(Math.round(pct)));
+    if (mode === "indeterminate") bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(Math.round(Math.max(0, Math.min(100, pct)))));
     $("progress-label").textContent = label || "";
   }
   async function loadStatus() {
@@ -324,43 +267,49 @@
       if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`);
       const s = await r.json();
       const last = s.last_run;
-      const row = [`<span>Son tarama <strong>${last ? ago(s.last_run_age_seconds) : "yok"}</strong></span>`];
-      if (last) row.push(`<span>yeni <strong>${esc(last.published)}</strong> · hata <strong>${esc(last.errors)}</strong></span>`);
-      row.push(`<span>Sonraki <strong>${s.next_run_at ? fmtTime(s.next_run_at) : "-"}</strong> (her ${Math.round((s.interval_seconds || 0) / 60)} dk)</span>`);
-      row.push(`<span>Bekleyen <strong>${esc(s.pending_count)}</strong></span>`);
-      $("status-row").innerHTML = row.join("");
+      const running = Boolean(s.running && s.progress);
+      let row;
+      let warning = s.warning || "";
+      if (running) row = "<span><strong>Tarama sürüyor</strong></span>";
+      else if (last) row = `<span>Son tarama <strong>${ago(s.last_run_age_seconds)}</strong></span><span><strong>${esc(last.published)}</strong> yeni haber</span>`;
+      else { row = `<span>${esc(warning || "İlk tarama bekleniyor")}</span>`; warning = ""; }
+      $("status-row").innerHTML = row;
       let level = s.stale ? "alarm" : (s.pending_count ? "warn" : "ok");
-      if (s.running && s.progress) {
+      if (running) {
         level = "running";
         const p = s.progress;
         const pct = Math.round((p.fraction || 0) * 100);
         const where = p.source ? `${p.source} · ${p.phase === "keşif" ? "bağlantılar bulunuyor" : "haberler çekiliyor"}` : "başlıyor";
-        setProgress(p.fraction > 0 ? "determinate" : "indeterminate", pct, `Tarama sürüyor: ${where} · %${pct} · ${p.published} yeni haber`);
+        setProgress(p.fraction > 0 ? "determinate" : "indeterminate", pct, `${where} · %${pct} · ${p.published} yeni haber`);
         next = 4000;
       } else if (s.next_run_at && last) {
         const total = (s.interval_seconds || 300) * 1000;
         const left = Math.max(0, new Date(s.next_run_at) - Date.now());
-        setProgress("waiting", 100 - (left / total) * 100, left > 0 ? `Sonraki taramaya ${Math.ceil(left / 60000)} dk` : "Sonraki tarama başlamak üzere");
+        const every = Math.round(total / 60000);
+        setProgress("waiting", 100 - (left / total) * 100, left > 0 ? `Sonraki taramaya ${Math.ceil(left / 60000)} dk (her ${every} dk)` : "Sonraki tarama başlamak üzere");
         next = 15000;
+      } else if (last) {
+        setProgress("waiting", 0, "");  /* zamanlayıcısız tek tur: gösterilecek ilerleme yok */
       } else {
-        setProgress("indeterminate", 0, "Kazıyıcının ilk turu bekleniyor");
+        setProgress("indeterminate", 0, "");
         next = 5000;
       }
+      $("progress").hidden = !running && Boolean(last) && !s.next_run_at;
       $("status").dataset.level = level;
-      $("status-icon").innerHTML = `<use href="#i-${level === "ok" ? "ok" : level === "running" ? "refresh" : level === "warn" ? "alert" : "alert"}"/>`;
-      $("status-msg").hidden = !s.warning;
-      $("status-msg").textContent = s.warning || "";
+      $("status-msg").hidden = !warning;
+      $("status-msg").textContent = warning;
       const box = $("pending-box");
-      box.hidden = !(s.pending && s.pending.length);
+      box.hidden = !(s.pending_count > 0);
       if (!box.hidden) {
-        $("pending-summary").textContent = `Çekilemeyen ${s.pending_count} haber (sonraki turda yeniden denenir)`;
-        $("pending-list").innerHTML = s.pending.map((p) => `<li><a href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title || p.url)}</a> <span class="tdate">${esc(p.source)} · ${esc(p.reason)} · ${esc(p.attempts)} deneme</span></li>`).join("");
+        $("pending-summary").textContent = `Çekilemeyen haberleri göster (${s.pending_count})`;
+        $("pending-list").innerHTML = (s.pending || []).map((p) => `<li><a href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title || p.url)}</a> <span class="tdate">${esc(p.source)} · ${esc(p.reason)} · ${esc(p.attempts)} deneme</span></li>`).join("");
       }
     } catch (e) {
       $("status").dataset.level = "warn";
-      $("status-icon").innerHTML = `<use href="#i-alert"/>`;
       $("status-row").innerHTML = `<span>Kazıyıcı durumu okunamadı: ${esc(e.message)}</span>`;
+      $("status-msg").hidden = true;
       setProgress("waiting", 0, "");
+      $("progress").hidden = true;
     }
     clearTimeout(statusTimer);
     statusTimer = setTimeout(loadStatus, next);
@@ -368,17 +317,15 @@
 
   /* arama */
   function renderArticle(doc, q) {
-    const kws = (doc.matched_keywords || []).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("");
     const sub = (doc.subtitle || "").trim();
-    let body = (doc.snippet || "").trim();
-    if (body && sub && body.slice(0, 60) === sub.slice(0, 60)) body = "";
+    const snippet = (doc.snippet || "").trim();
+    const text = q && snippet ? snippet : (sub || snippet);
     const score = Number(doc.alarm_score || 0);
-    return `<article class="item${doc.is_alarm ? " alarm" : ""}">
+    return `<article class="card${doc.is_alarm ? " alarm" : ""}">
+      <div class="meta"><span class="when">${esc(doc.source)} · ${fmtDate(doc.published_at)}</span>${doc.is_alarm ? `<span class="badge ${scoreClass(score)}">alarm ${score}</span>` : ""}</div>
       <h3><a href="${safeUrl(doc.content_url)}" target="_blank" rel="noopener">${esc(doc.title)}</a></h3>
-      <div class="meta"><span>${esc(doc.source)}</span><span>${fmtDate(doc.published_at)}</span><span class="badge ${doc.is_alarm ? scoreClass(score) : "routine"}">${doc.is_alarm ? icon("bell") + " " : ""}skor ${score}</span>${kws}</div>
-      ${sub ? `<p class="text sub">${highlight(sub, q)}</p>` : ""}
-      ${body ? `<p class="text">${highlight(body, q)}</p>` : ""}
-      ${doc.is_alarm && doc.alarm_reason ? `<div class="reason">${esc(doc.alarm_reason)}</div>` : ""}
+      ${text ? `<p class="text">${highlight(text, q)}</p>` : ""}
+      <div class="foot">${chips(doc.matched_keywords)}</div>
     </article>`;
   }
   async function search(ev) {
@@ -414,10 +361,10 @@
       if (!answer.retrieved_count) note = "Bu süre içinde soruyla eşleşen haber bulunamadı.";
       else if (answer.model === "fallback") note += " · cevap haberlerin metninden doğrudan derlendi";
       $("ask-note").textContent = note;
-      const timeline = (answer.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${t.citation}] ` : ""}${esc(t.event)}</li>`).join("");
+      const timeline = (answer.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${esc(t.citation)}] ` : ""}${esc(t.event)}</li>`).join("");
       const sources = (answer.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${safeUrl(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
-      $("ask-result").innerHTML = `<article class="item"><p class="answer">${esc(answer.answer)}</p>` +
-        (sources ? `<details class="sources"><summary>${icon("chevron").replace('class="icon"', 'class="icon chev"')}Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
+      $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(answer.answer)}</p>` +
+        (sources ? `<details class="sources"><summary>Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
           (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi · eskiden yeniye</h2><ol class="timeline">${timeline}</ol>` : "") +
           `<h2 class="small" style="margin-top:10px">Kaynaklar</h2><ol class="srcs">${sources}</ol></details>` : "") + `</article>`;
     } catch (e) { $("ask-note").textContent = "Soru yanıtlanamadı: " + e.message; }
@@ -432,7 +379,7 @@
     try {
       const r = await fetch(`/alarms/${encodeURIComponent(btn.dataset.id)}/feedback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: btn.dataset.label, user: "arayüz" }) });
       if (!r.ok) throw new Error();
-      btn.innerHTML = `${icon("check")}Kaydedildi`;
+      btn.textContent = "Kaydedildi";
     } catch (e) {
       btn.textContent = "Kaydedilemedi";
       group.forEach((b) => { b.disabled = false; });
@@ -442,21 +389,21 @@
     $("alarms").querySelectorAll(".fb button").forEach((b) => b.addEventListener("click", () => feedback(b)));
   }
   function renderAlarm(a) {
-    const kws = (a.matched_keywords || []).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("");
     const score = Number(a.alarm_score || 0);
-    return `<article class="item alarm">
+    return `<article class="card alarm">
+      <div class="meta"><span class="when">${esc(a.source)} · ${fmtDate(a.published_at)}</span><span class="badge ${scoreClass(score)}">skor ${score}</span></div>
       <h3><a href="${safeUrl(a.content_url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
-      <div class="meta"><span>${esc(a.source)}</span><span>${fmtDate(a.published_at)}</span><span class="badge ${scoreClass(score)}">skor ${score}</span>${kws}${a.needs_review ? `<span class="chip review">${icon("alert")}inceleme</span>` : ""}${a.duplicate_of ? `<span class="chip">tekrar</span>` : ""}</div>
-      ${a.alarm_reason ? `<div class="reason">${esc(a.alarm_reason)}</div>` : ""}
-      ${a.alarm_id ? `<div class="fb"><span>Bu alarm doğru mu?</span>
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="true_positive">${icon("check")}Doğru</button>
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="false_positive">${icon("x")}Yanlış</button>
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="needs_context">${icon("help")}Belirsiz</button></div>` : ""}
+      ${a.alarm_reason ? `<div class="reason"><p>${esc(a.alarm_reason)}</p></div>` : ""}
+      <div class="foot">${chips(a.matched_keywords)}${a.needs_review ? `<span class="chip review">inceleme</span>` : ""}${a.duplicate_of ? `<span class="chip">tekrar</span>` : ""}</div>
+      ${a.alarm_id ? `<div class="fb" role="group" aria-label="Bu alarm doğru mu?">
+        <button type="button" data-id="${esc(a.alarm_id)}" data-label="true_positive">Doğru</button>
+        <button type="button" data-id="${esc(a.alarm_id)}" data-label="false_positive">Yanlış</button>
+        <button type="button" data-id="${esc(a.alarm_id)}" data-label="needs_context">Belirsiz</button></div>` : ""}
     </article>`;
   }
   async function loadAlarms(ev) {
     if (ev) ev.preventDefault();
-    const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 100, include_duplicates: $("alarm-dups").value });
+    const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 99, include_duplicates: $("alarm-dups").value });
     $("alarm-note").textContent = "Yükleniyor…";
     try {
       const r = await fetch("/alarms?" + p.toString());
