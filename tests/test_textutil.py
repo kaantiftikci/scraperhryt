@@ -90,3 +90,26 @@ def test_html_to_text_and_helpers() -> None:
     assert text == "Birinci\n\nİkinci satır"
     assert normalize_ws("a \t b\n\n\n\nc") == "a b\n\nc"
     assert excerpt("kelime " * 100, limit=30).endswith("…")
+
+
+def test_default_keywords_cover_agenda_words_with_turkish_suffixes() -> None:
+    from scraperhryt.config import Settings
+
+    matcher = KeywordMatcher(Settings(_env_file=None).keyword_list)
+    cases = {
+        "AK Parti milletvekilleri önergeye ret oyu verdi": "milletvekili",
+        "Kanun teklifi Meclis'te kabul edildi": "meclis",
+        "Atamalar Cumhurbaşkanlığı kararnamesiyle yapıldı": "kararname",
+        "Belediyedeki yolsuzluğa ilişkin iddianame hazırlandı": "yolsuzluk",
+        "Yolsuzluğun boyutu ortaya çıktı": "yolsuzluk",
+        "Köprü ihalesini konsorsiyum kazandı": "ihale",
+    }
+    for text, keyword in cases.items():
+        assert keyword in matcher.matches(text), text
+
+
+def test_consonant_softening_only_for_longer_keywords() -> None:
+    assert KeywordMatcher(["ittifak"]).matches("İttifağın adayı açıklandı") == ["ittifak"]
+    assert KeywordMatcher(["kitap"]).matches("Kitabı yayımlandı") == ["kitap"]
+    # kısa kelimeler yumuşatılmaz: "at" → "ad" başka bir kelimedir
+    assert KeywordMatcher(["at"]).matches("Adı açıklanmadı") == []

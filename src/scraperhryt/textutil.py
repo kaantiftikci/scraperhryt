@@ -68,6 +68,7 @@ _SUFFIXES = (
     "ı|i|u|ü|a|e|m|n"
 )
 _APOS = r"(?:['’`]?)"
+_SOFTENING = {"p": "b", "ç": "c", "t": "d", "k": "ğ"}
 _WORD_CHARS = r"[0-9A-Za-zÇĞİÖŞÜçğıöşüÂÎÛâîû_]"
 
 
@@ -77,6 +78,10 @@ def _stem_candidates(keyword: str) -> list[str]:
     cands = [kw]
     if len(kw) > 3 and kw[-1] in "ıiuü" and kw[-2] not in "aeıioöuü":
         cands.append(kw[:-1])
+    # Ünsüz yumuşaması: ünlüyle başlayan ekte son p/ç/t/k → b/c/d/ğ ("yolsuzluk" → "yolsuzluğu"). Kısa
+    # kelimelerde ("at" → "ad") başka bir kelimeye dönüşebildiğinden yalnızca 5+ harfli anahtar kelimelerde.
+    if len(kw) >= 5 and kw[-1] in _SOFTENING and kw[-2] in "aeıioöuü":
+        cands.append(kw[:-1] + _SOFTENING[kw[-1]])
     return cands
 
 

@@ -2,5 +2,10 @@
   "_açıklama": "Kanonik anahtar kelime → eş anlamlı / ilgili varlık listesi. Eşleşmeler kanonik adla kaydedilir. '=' tam kelime, '~' alt dize, 're:' regex; öneksiz değerler Türkçe ek toleranslı kök eşleşmesidir.",
   "bakan": ["bakanlık", "Hazine ve Maliye Bakanlığı", "İçişleri Bakanlığı", "Adalet Bakanlığı", "Dışişleri Bakanlığı", "Milli Eğitim Bakanlığı", "Sağlık Bakanlığı", "Kabine toplantısı", "Bakanlar Kurulu"],
   "cumhurbaşkanı": ["Cumhurbaşkanlığı", "Erdoğan", "Beştepe", "Cumhurbaşkanı Yardımcısı", "Cevdet Yılmaz", "Külliye"],
-  "fon": ["fon soruşturması", "fon vurgunu", "yatırım fonu", "portföy yönetim", "SPK", "Sermaye Piyasası Kurulu", "MASAK", "Tera Yatırım"]
+  "fon": ["fon soruşturması", "fon vurgunu", "yatırım fonu", "portföy yönetim", "SPK", "Sermaye Piyasası Kurulu", "MASAK", "Tera Yatırım"],
+  "milletvekili": ["TBMM üyesi", "Grup Başkanvekili", "dokunulmazlık", "fezleke"],
+  "meclis": ["TBMM", "Türkiye Büyük Millet Meclisi", "Meclis Başkanı", "kanun teklifi", "torba yasa", "yasa teklifi"],
+  "kararname": ["Resmi Gazete", "Cumhurbaşkanlığı Kararnamesi", "Cumhurbaşkanı kararı", "=KHK", "atama kararı"],
+  "yolsuzluk": ["rüşvet", "irtikap", "zimmet", "kara para", "usulsüzlük", "ihaleye fesat"],
+  "ihale": ["Kamu İhale Kurumu", "pazarlık usulü"]
 }

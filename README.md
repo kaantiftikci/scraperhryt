@@ -213,7 +213,7 @@ Tümü `.env` dosyasından ya da ortamdan okunur (önek yok, büyük/küçük ha
 
 | Değişken | Varsayılan | Anlamı |
 |----------|------------|--------|
-| `KEYWORDS` | `bakan,cumhurbaşkanı,fon` | Virgülle ayrılmış liste. Varsayılan mod Türkçe ek-toleranslı kök eşleşmesi; `=kelime` tam kelime, `~parça` alt dize, `re:desen` regex. |
+| `KEYWORDS` | `bakan,cumhurbaşkanı,fon,milletvekili,meclis,kararname,yolsuzluk,ihale` | Virgülle ayrılmış liste. Varsayılan mod Türkçe ek-toleranslı kök eşleşmesi; `=kelime` tam kelime, `~parça` alt dize, `re:desen` regex. |
 | `ALARM_THRESHOLD` | `60` | `alarm_score >= ALARM_THRESHOLD` → alarm (0-100). |
 | `LLM_SCORE_ALL` | `false` | `true` ise anahtar kelime içermeyen haberler de LLM'e gönderilir (maliyetli). |
 

@@ -639,6 +639,11 @@ KEYWORD_TOPICS: dict[str, str] = {
     "bakan": "siyaset",
     "cumhurbaşkanı": "siyaset",
     "fon": "finans/fon",
+    "milletvekili": "siyaset",
+    "meclis": "siyaset",
+    "kararname": "siyaset",
+    "yolsuzluk": "hukuk",
+    "ihale": "ekonomi",
 }
 
 _HEURISTIC_BASE = 8

@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # ---- Anahtar kelime filtresi ----
     # Virgülle ayrılmış liste. Varsayılan eşleşme modu Türkçe ek-toleranslı kök eşleşmesidir
     # ("bakan" → bakanı, bakanlık, bakanlar...). "=kelime" tam eşleşme, "re:..." regex.
-    keywords: str = "bakan,cumhurbaşkanı,fon"
+    keywords: str = "bakan,cumhurbaşkanı,fon,milletvekili,meclis,kararname,yolsuzluk,ihale"
     alarm_threshold: int = Field(default=60, ge=0, le=100)
     llm_score_all: bool = False  # True ise anahtar kelime içermeyen haberler de LLM'e gönderilir
     keyword_aliases_path: str = "config/keyword_aliases.json"  # kanonik anahtar kelime → eş anlamlı/varlık listesi
