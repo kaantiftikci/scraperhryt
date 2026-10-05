@@ -29,7 +29,7 @@ from elasticsearch import ConnectionError as ESConnectionError
 from elasticsearch import TransportError as ESTransportError
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import Path as PathParam
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -545,10 +545,10 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
 
         return guarded("kazıyıcı durumu", lambda: scraper_status(settings))
 
-    @app.get("/ara", response_class=HTMLResponse, include_in_schema=False)
-    def search_page(request: Request) -> HTMLResponse:
-        """Arama / soru-cevap / alarm arayüzü (tek sayfa, mevcut JSON uçlarını kullanır)."""
-        return templates.TemplateResponse(request, "search.html", {"since_days": settings.rag_recency_days})
+    @app.get("/ara", include_in_schema=False)
+    def search_page() -> RedirectResponse:
+        """Eski arama adresi: arayüz tek sayfada birleştirildi."""
+        return RedirectResponse(url="/", status_code=307)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard(request: Request) -> HTMLResponse:
@@ -584,7 +584,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
             "error": error,
             "version": __version__,
         }
-        return templates.TemplateResponse(request, "dashboard.html", context)
+        return templates.TemplateResponse(request, "app.html", context)
 
     return app
 
@@ -608,6 +608,8 @@ def _alarm_view(doc: Mapping[str, Any]) -> dict[str, Any]:
         "raised_at": doc.get("raised_at"),
         "matched_keywords": [str(k) for k in (doc.get("matched_keywords") or [])],
         "channels": [str(c) for c in (doc.get("channels_notified") or [])],
+        "needs_review": bool(doc.get("needs_review")),
+        "duplicate_of": str(doc.get("duplicate_of") or ""),
     }
 
 

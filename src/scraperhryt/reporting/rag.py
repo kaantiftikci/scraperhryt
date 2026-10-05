@@ -965,13 +965,17 @@ def extractive_answer(
 def make_snippet(
     doc: Mapping[str, Any], highlights: Mapping[str, Sequence[str]] | None = None, limit: int = 240
 ) -> str:
-    """Atıf parçacığı: önce arama vurgusu (``<em>`` etiketleri temizlenir), yoksa LLM özeti / alt başlık / içerik."""
-    for field_name in ("content", "llm_summary", "subtitle"):
+    """Atıf parçacığı: önce haber metnindeki arama vurgusu (``<em>`` etiketleri temizlenir), yoksa içeriğin başı.
+
+    Yalnızca gazetecinin metni kullanılır; skorlama aşamasındaki LLM özeti hatalı sayı içerebileceği için
+    parçacığa girmez. Alt başlık kartta ayrıca gösterildiğinden yedek olarak en sona kalır.
+    """
+    for field_name in ("content", "subtitle"):
         for fragment in (highlights or {}).get(field_name) or []:
             text = flat_text(_EM_TAG_RE.sub("", str(fragment)))
             if text:
                 return excerpt(text, limit)
-    text = flat_text(doc.get("llm_summary")) or flat_text(doc.get("subtitle")) or flat_text(doc.get("content"))
+    text = flat_text(doc.get("content")) or flat_text(doc.get("subtitle"))
     return excerpt(text, limit) if text else ""
 
 

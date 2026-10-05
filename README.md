@@ -583,3 +583,12 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 - **Model cevap veremezse:** Yedek özet de haberin kendi metninden üretilir. Konunun kendisi olan haberlerde alt başlık ve ilk cümleler öne çıkar. Adın yalnızca metnin içinde geçtiği haberlerde ise o adı içeren cümleler seçilir. Her habere önce bir cümle düşer, böylece farklı gelişmeler kapsanır. Skorlama aşamasındaki LLM özetleri kullanılmaz.
 - **İlgililik:** Sorudaki özel adlar ve kısaltmalar (TFF, MHK) zorunludur. Unvanlı adlar ("Bakan Fidan") ada indirgenir. Cümle başındaki ad ("Erdoğan ne dedi?") haberlerdeki kullanımına bakılarak özel ad olarak tanınır. "fiyat", "zam", "kriz" gibi genel sözcükler tek başına bir haberi ilgili saymaz. Hafif bir Türkçe kök bulucu çekimleri eşler ("tutuklamalarında" ile "tutuklandı").
 - **Sayı doğrulama:** Cevaptaki ve alarm özetlerindeki her sayı, büyüklüğüyle birlikte (bin, milyon, milyar) kaynak haberde aranır. Kaynakta karşılığı olmayan sayıyı içeren cümle atılır; örneğin haberde "20 milyar" yazarken model "20 milyon" yazarsa. Yazıyla yazılmış sayılar ("beşinci dalga") tanınır. Tarih ve saatler bu denetimin dışındadır.
+
+## Arayüz
+
+Tek sayfa: `http://localhost:8000/` (Docker'da `API_PORT` ile değiştirilebilir; eski `/ara` adresi buraya yönlenir).
+
+- **Durum şeridi:** son ve sonraki tarama, çekilemeyen (bekleyen) haberler ve uyarılar. Tarama sürerken canlı ilerleme çubuğu kaynağı, aşamayı ve yüzdeyi gösterir; turlar arasında çubuk sonraki taramaya kalan süreyi doldurur.
+- **Son 24 saat:** haber ve alarm sayısı, ortalama alarm skoru, en yoğun saat; kaynak, anahtar kelime ve kategori dağılımı.
+- **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar (Doğru / Yanlış / Belirsiz geri bildirimi), Raporlar.
+- İkonlar satır içi SVG'dir; açık ve koyu tema ile telefon genişliği desteklenir.

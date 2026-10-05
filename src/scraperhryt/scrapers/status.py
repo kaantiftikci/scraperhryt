@@ -6,6 +6,7 @@ kazıyıcı ayrı süreçte çalışsa da (docker'da paylaşılan ``data`` birim
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ def scraper_status(settings: Settings, *, now: datetime | None = None, pending_l
             "next_run_at": None,
             "interval_seconds": interval,
             "recent_runs": [],
+            "running": False,
+            "progress": None,
         }
     store = SeenStore(path)
     try:
@@ -48,13 +51,18 @@ def scraper_status(settings: Settings, *, now: datetime | None = None, pending_l
         recent = store.recent_runs(limit=12)
         next_run = _dt(store.get_meta("next_run_at"))
         interval = int(store.get_meta("interval_seconds") or interval)
+        raw_state = store.get_meta("run_state")
     finally:
         store.close()
+    progress = _progress(raw_state, now)
     finished = _dt(last["finished_at"]) if last else None
     age = (now - finished) if finished else None
-    stale = finished is None or age > timedelta(seconds=2 * interval + 60)
+    running = progress is not None
+    stale = not running and (finished is None or age > timedelta(seconds=2 * interval + 60))
     warnings: list[str] = []
-    if finished is None:
+    if finished is None and running:
+        warnings.append("İlk tarama sürüyor; haberler çekildikçe arama sonuçlarına düşecek.")
+    elif finished is None:
         warnings.append("Kazıyıcı henüz bir tur tamamlamadı.")
     elif stale:
         warnings.append(f"Son tarama {_age_text(age)} önce; beklenen aralık {interval // 60} dk. Kazıyıcı çalışmıyor olabilir.")
@@ -76,6 +84,36 @@ def scraper_status(settings: Settings, *, now: datetime | None = None, pending_l
         "pending_count": pending_count,
         "pending": pending,
         "recent_runs": recent,
+        "running": running,
+        "progress": progress,
+    }
+
+
+_PROGRESS_STALE = timedelta(minutes=5)  # bu süredir güncellenmeyen "sürüyor" kaydı yarıda kalmış sayılır
+
+
+def _progress(raw: str | None, now: datetime) -> dict[str, Any] | None:
+    """Kazıyıcının yazdığı canlı tur durumu; tur sürmüyorsa ya da kayıt bayatsa None."""
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw)
+    except ValueError:
+        return None
+    if not state.get("running"):
+        return None
+    updated = _dt(state.get("updated_at"))
+    if updated is None or now - updated > _PROGRESS_STALE:
+        return None
+    return {
+        "fraction": float(state.get("fraction") or 0.0),
+        "source": str(state.get("source") or ""),
+        "phase": str(state.get("phase") or ""),
+        "published": int(state.get("published") or 0),
+        "fetched": int(state.get("fetched") or 0),
+        "errors": int(state.get("errors") or 0),
+        "started_at": state.get("started_at"),
+        "updated_at": state.get("updated_at"),
     }
 
 

@@ -79,7 +79,7 @@ Bileşenler ve sorumlulukları:
 | LLM skorlayıcı | `pipeline/scorer.py`, `pipeline/llm.py`, `pipeline/prompts.py` | `q.articles.keyword` → `article.scored` | durumsuz (Ollama dış bağımlılık) |
 | Alarm katmanı | `pipeline/alarm.py`, `alarm_sinks.py`, `store.py` | `q.articles.scored` → ES + `alarm.raised` + kanallar | durum ES'te (`news-alarms` ile idempotentlik) |
 | Raporlama katmanı | `reporting/service.py`, `reporting/builder.py`, `reporting/prompts.py` | `q.alarms` + ES → `news-reports` + `report.*` | bellek içi alarm tamponu + son özet zamanı |
-| API / Pano / Soru-Cevap | `reporting/api.py`, `reporting/rag.py`, `reporting/templates/dashboard.html` | HTTP → ES + Ollama | durumsuz |
+| API / Pano / Soru-Cevap | `reporting/api.py`, `reporting/rag.py`, `reporting/templates/app.html` | HTTP → ES + Ollama | durumsuz |
 | Ortak | `config.py` (Settings), `models.py` (NewsRecord, AlarmEvent, Report, Answer), `broker.py`, `textutil.py`, `logging_setup.py`, `cli.py` | — | — |
 
 ---
@@ -237,7 +237,7 @@ flowchart TB
         STO["Report Store<br/>store.index_report → news-reports"]
         PUB["Report Publisher<br/>broker.publish(report.*)"]
         QNA["Q&A Engine<br/>QAEngine.ask (rag.py)"]
-        API["Report API + Pano<br/>api.py · templates/dashboard.html"]
+        API["Report API + Pano<br/>api.py · templates/app.html"]
     end
 
     subgraph Çıktılar

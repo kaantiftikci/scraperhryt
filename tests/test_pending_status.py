@@ -91,3 +91,40 @@ def test_scraper_status_and_api(tmp_path: Path) -> None:
     assert body["pending_count"] == 1 and body["last_run"]["errors"] == 1
     page = client.get("/ara")
     assert page.status_code == 200 and "Haber Radarı" in page.text and "/scraper/status" in page.text
+
+
+def test_runner_reports_live_progress_and_status_exposes_it(tmp_path: Path) -> None:
+    import json as _json
+
+    runner, _broker, seen = _runner(tmp_path, FlakySource())
+    states: list[dict] = []
+    original = seen.set_meta
+
+    def spy(key: str, value: str) -> None:
+        if key == "run_state":
+            states.append(_json.loads(value))
+        original(key, value)
+
+    seen.set_meta = spy  # type: ignore[method-assign]
+    runner.run_once()
+    assert states[0]["running"] is True and states[0]["phase"] == "başlıyor"
+    assert any(s["phase"] == "çekme" and s["source"] == "hurriyet" for s in states)
+    assert states[-1]["running"] is False and states[-1]["fraction"] == 1.0
+    fractions = [s["fraction"] for s in states]
+    assert fractions == sorted(fractions)
+
+    settings = Settings(_env_file=None, state_db_path=str(tmp_path / "state.sqlite3"))
+    assert scraper_status(settings)["running"] is False
+    seen.set_meta("run_state", _json.dumps({**states[1], "updated_at": states[1]["updated_at"]}))
+    status = scraper_status(settings)
+    assert status["running"] is True and status["progress"]["source"] in ("", "hurriyet") and status["stale"] is False
+
+
+def test_ui_has_no_emoji_and_uses_svg_icons() -> None:
+    import re as _re
+
+    root = Path(__file__).resolve().parents[1] / "src" / "scraperhryt" / "reporting" / "templates"
+    for page in root.glob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        assert not _re.search("[\U0001F300-\U0001FAFF☀-➿←-⇿■-◿]", text), page.name
+        assert "<symbol id=" in text and 'role="progressbar"' in text

@@ -28,6 +28,7 @@ NOISY_LOGGERS = (
 #: Bağlantı kopmalarında kendi ERROR+traceback'ini basan pika iç günlükçüleri; broker katmanı zaten uyarı verir.
 SILENT_LOGGERS = (
     "pika.adapters.utils.io_services_utils",
+    "pika.adapters.utils.connection_workflow",
     "pika.adapters.base_connection",
     "pika.adapters.blocking_connection",
 )

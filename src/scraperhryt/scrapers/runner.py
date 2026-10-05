@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -188,7 +190,59 @@ class ScrapeRunner:
 
         days = self.settings.backfill_days if backfill_days is None else max(0, int(backfill_days))
         budget = max(0, int(self.settings.max_articles_per_run))
+        self._progress_started = stats.started_at
+        self._last_progress_write = 0.0
+        self._report_progress(stats, fraction=0.0, source="", phase="başlıyor", force=True)
+        try:
+            self._run_sources(stats, days=days, budget=budget, stop_requested=stop_requested)
+        finally:
+            self._report_progress(stats, fraction=1.0, source="", phase="bitti", running=False, force=True)
+        stats.finished_at = utcnow()
+        stats.pending_after = self.seen.pending_count()
+        try:
+            self.seen.record_run(stats)
+        except Exception:  # pragma: no cover - yalnızca durum kaydı
+            log.exception("Kazıma turu kaydedilemedi")
+        if stats.pending_after:
+            log.warning("%d haber bu turda çekilemedi; sonraki turda yeniden denenecek", stats.pending_after)
+        return stats
+
+    # --- canlı ilerleme (arayüzdeki ilerleme çubuğu için) ---
+    def _report_progress(
+        self,
+        stats: ScrapeStats,
+        *,
+        fraction: float,
+        source: str,
+        phase: str,
+        running: bool = True,
+        force: bool = False,
+    ) -> None:
+        """Tur ilerlemesini durum veritabanına yazar (en çok saniyede bir; faz değişince hemen)."""
+        now = time.monotonic()
+        if not force and now - getattr(self, "_last_progress_write", 0.0) < 1.0:
+            return
+        self._last_progress_write = now
+        state = {
+            "running": running,
+            "started_at": getattr(self, "_progress_started", stats.started_at).isoformat(),
+            "updated_at": utcnow().isoformat(),
+            "fraction": round(max(0.0, min(1.0, fraction)), 4),
+            "source": source,
+            "phase": phase,
+            "published": stats.published,
+            "fetched": stats.fetched,
+            "errors": stats.errors,
+            "sources": len(self.sources),
+        }
+        try:
+            self.seen.set_meta("run_state", json.dumps(state, ensure_ascii=False))
+        except Exception:  # pragma: no cover - ilerleme kaydı taramayı durdurmamalı
+            log.debug("İlerleme kaydedilemedi", exc_info=True)
+
+    def _run_sources(self, stats: ScrapeStats, *, days: int, budget: int, stop_requested) -> None:
         attempts = 0
+        n_sources = max(1, len(self.sources))
         for index, source in enumerate(self.sources):
             if stop_requested():
                 break
@@ -200,6 +254,7 @@ class ScrapeRunner:
                 stats.budget_exhausted = True
                 continue
             source_attempts = 0
+            self._report_progress(stats, fraction=index / n_sources, source=source.name, phase="keşif", force=True)
             try:
                 links = source.discover(self.client, backfill_days=days)
             except Exception:
@@ -214,7 +269,10 @@ class ScrapeRunner:
             # Yeni keşfedilen haberler önce: birikmiş bekleyen liste güncel haberleri ve alarmları geciktirmesin.
             links = links + pending_links
             log.info("%s: %d bağlantı keşfedildi", source.name, source_stats.discovered)
+            self._report_progress(stats, fraction=index / n_sources, source=source.name, phase="çekme", force=True)
             for index_link, link in enumerate(links):
+                within = max(index_link / max(1, len(links)), source_attempts / max(1, quota))
+                self._report_progress(stats, fraction=(index + min(1.0, within)) / n_sources, source=source.name, phase="çekme")
                 if stop_requested():
                     self._defer(source.name, links[index_link:], "durdurma sinyali: tur yarıda kesildi")
                     break
@@ -244,15 +302,6 @@ class ScrapeRunner:
                     self._remember_failure(source.name, link, "çekme hatası")
                 else:
                     self.seen.remove_pending(link.id)
-        stats.finished_at = utcnow()
-        stats.pending_after = self.seen.pending_count()
-        try:
-            self.seen.record_run(stats)
-        except Exception:  # pragma: no cover - yalnızca durum kaydı
-            log.exception("Kazıma turu kaydedilemedi")
-        if stats.pending_after:
-            log.warning("%d haber bu turda çekilemedi; sonraki turda yeniden denenecek", stats.pending_after)
-        return stats
 
     # --- bekleyen bağlantılar ---
     def _pending_links(self, source_name: str, *, exclude: set[str]) -> list[DiscoveredLink]:
