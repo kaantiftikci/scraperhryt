@@ -229,7 +229,7 @@
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
-  const ASK_LIMIT_MS = {{ ((settings.rag_rewrite_timeout + settings.rag_answer_timeout + 60) * 1000) | int }};
+  const ASK_LIMIT_MS = {{ (((settings.rag_rewrite_timeout if settings.rag_query_rewrite else 0) + settings.rag_answer_timeout + 60) * 1000) | int }};
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const safeUrl = (u) => /^https?:\/\//i.test(String(u || "")) ? esc(u) : "#";
   /* sunucudaki tr_dt ile aynı biçim: 02.10.2026 22:20 (Türkiye saati) */
@@ -360,9 +360,32 @@
     const ctrl = new AbortController();
     const limit = setTimeout(() => ctrl.abort(), ASK_LIMIT_MS);
     try {
-      const r = await fetch("/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("since").value) || undefined, sources: $("source").value ? [$("source").value] : undefined }) });
+      const r = await fetch("/ask/stream", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("since").value) || undefined, sources: $("source").value ? [$("source").value] : undefined }) });
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-      const answer = await r.json();
+      /* NDJSON akışı: önce kaynaklar, sonra model metni parça parça, en sonda doğrulanmış yanıt */
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "", streamed = "", answer = null;
+      const onEvent = (ev) => {
+        if (ev.type === "token") {
+          if (!streamed) { clearInterval(ticker); $("ask-note").textContent = "Yanıt yazılıyor…"; }
+          streamed += ev.text;
+          $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(streamed)}</p></article>`;
+        } else if (ev.type === "answer") answer = ev.answer;
+        else if (ev.type === "error") throw new Error(ev.detail || "akış hatası");
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line) onEvent(JSON.parse(line));
+        }
+        if (done) break;
+      }
+      if (!answer) throw new Error("yanıt tamamlanmadı");
       const secs = Math.round((Date.now() - started) / 1000);
       let note = `${answer.retrieved_count} haber · model ${answer.model} · ${secs} sn`;
       if (!answer.retrieved_count) note = "Bu süre içinde soruyla eşleşen haber bulunamadı.";

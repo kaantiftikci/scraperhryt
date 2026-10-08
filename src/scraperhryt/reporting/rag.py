@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -152,6 +152,34 @@ def doc_timestamp(doc: dict[str, Any]) -> datetime | None:
     return None
 
 
+@dataclass
+class PreparedQuestion:
+    """LLM yanıtından önceki adımların çıktısı (``QAEngine.prepare``)."""
+
+    question: str
+    days: int
+    search_terms: list[str]
+    entities: list[str]
+    ordered: list[RankedDoc]
+    blocks: list[str]
+    citations: list[Citation]
+
+    def no_evidence_answer(self) -> tuple[str, str]:
+        scope = f" (Son {self.days} günde taranan haberler arasında eşleşme bulunamadı.)" if self.days > 0 else ""
+        return INSUFFICIENT_EVIDENCE_TEXT + scope, NO_EVIDENCE_MODEL
+
+    def to_answer(self, answer_text: str, model: str) -> Answer:
+        return Answer(
+            question=self.question,
+            answer=answer_text,
+            sources=self.citations,
+            model=model,
+            retrieved_count=len(self.citations),
+            search_terms=self.search_terms,
+            timeline=build_timeline(self.citations),
+        )
+
+
 class QAEngine:
     """Depo + LLM üzerinde RAG soru-cevap. ``FakeOllama`` ve ``HeuristicLLM`` ile de çalışır."""
 
@@ -177,6 +205,60 @@ class QAEngine:
         top_k: int | None = None,
         sources: Sequence[str] | None = None,
     ) -> Answer:
+        prepared = self.prepare(question, since_days=since_days, top_k=top_k, sources=sources)
+        if not prepared.citations:
+            answer_text, model = prepared.no_evidence_answer()
+        else:
+            answer_text, model = self.generate_answer(
+                prepared.question, prepared.blocks, prepared.ordered, prepared.citations,
+                since_days=prepared.days, entities=prepared.entities,
+            )
+        return prepared.to_answer(answer_text, model)
+
+    def stream_answer(self, prepared: PreparedQuestion) -> Iterator[dict[str, Any]]:
+        """Yanıtı akış hâlinde üretir: önce kaynaklar, sonra model metni parça parça, en sonda doğrulanmış yanıt.
+
+        Olaylar: ``{"type": "sources", ...}``, ``{"type": "token", "text": ...}``, ``{"type": "answer", "answer": ...}``.
+        Son yanıt sayısal doğrulama ve kısaltmadan geçtiği için akan metinden farklı olabilir; arayüz onu esas alır.
+        """
+        yield {
+            "type": "sources",
+            "sources": [c.model_dump(mode="json") for c in prepared.citations],
+            "search_terms": prepared.search_terms,
+        }
+        stream = getattr(self.llm, "stream_text", None)
+        if not prepared.citations:
+            answer_text, model = prepared.no_evidence_answer()
+        elif self._offline or stream is None:
+            answer_text, model = self.generate_answer(
+                prepared.question, prepared.blocks, prepared.ordered, prepared.citations,
+                since_days=prepared.days, entities=prepared.entities,
+            )
+        else:
+            user = build_rag_user_prompt(prepared.question, prepared.blocks, since_days=prepared.days)
+            pieces: list[str] = []
+            try:
+                for piece in stream(RAG_SYSTEM_PROMPT, user, timeout=self.settings.rag_answer_timeout):
+                    pieces.append(piece)
+                    yield {"type": "token", "text": piece}
+            except LLMError as exc:
+                log.warning("LLM yanıt üretemedi; haberlerden çıkarımsal yedek yanıt derlenecek: %s", exc)
+                answer_text, model = self._fallback_answer(prepared.question, prepared.ordered, prepared.citations, prepared.entities, str(exc))
+            else:
+                answer_text, model = self.finish_answer(
+                    "".join(pieces), prepared.question, prepared.ordered, prepared.citations, entities=prepared.entities
+                )
+        yield {"type": "answer", "answer": prepared.to_answer(answer_text, model).model_dump(mode="json")}
+
+    def prepare(
+        self,
+        question: str,
+        *,
+        since_days: int | None = None,
+        top_k: int | None = None,
+        sources: Sequence[str] | None = None,
+    ) -> PreparedQuestion:
+        """Arama, süzme, yeniden sıralama ve bağlam: LLM yanıtından önceki tüm adımlar."""
         question = flat_text(question)
         if not question:
             raise ValueError("Soru boş olamaz")
@@ -212,23 +294,9 @@ class QAEngine:
             len(citations),
             days if days > 0 else "sınırsız",
         )
-
-        if not citations:
-            scope = f" (Son {days} günde taranan haberler arasında eşleşme bulunamadı.)" if days > 0 else ""
-            answer_text, model = INSUFFICIENT_EVIDENCE_TEXT + scope, NO_EVIDENCE_MODEL
-        else:
-            answer_text, model = self.generate_answer(
-                question, blocks, ordered, citations, since_days=days, entities=entities
-            )
-
-        return Answer(
-            question=question,
-            answer=answer_text,
-            sources=citations,
-            model=model,
-            retrieved_count=len(citations),
-            search_terms=search_terms,
-            timeline=build_timeline(citations),
+        return PreparedQuestion(
+            question=question, days=days, search_terms=search_terms, entities=list(entities),
+            ordered=ordered, blocks=blocks, citations=citations,
         )
 
     # --- 2b. yeniden sıralama ---
@@ -250,7 +318,7 @@ class QAEngine:
     def rewrite_query(self, question: str) -> tuple[list[str], list[str]]:
         """``(search_terms, entities)``; LLM yoksa/hata verirse ``(question_tokens(question), [])``."""
         fallback = question_tokens(question)
-        if self._offline:
+        if self._offline or not self.settings.rag_query_rewrite:
             return fallback, []
         try:
             data = self.llm.chat_json(
@@ -392,20 +460,44 @@ class QAEngine:
 
         ``ordered`` ve ``citations`` aynı (en yeni önce) sırada olmalıdır; atıf numaraları bu sıraya göredir.
         """
-        def fallback(reason: str = "") -> tuple[str, str]:
-            return (
-                extractive_answer(ordered, citations, reason=reason, question=question, entities=entities),
-                FALLBACK_MODEL,
-            )
-
         if self._offline:
-            return fallback()
+            return self._fallback_answer(question, ordered, citations, entities)
         user = build_rag_user_prompt(question, blocks, since_days=since_days)
         try:
-            text = normalize_ws(self.llm.generate_text(RAG_SYSTEM_PROMPT, user, timeout=self.settings.rag_answer_timeout))
+            text = self.llm.generate_text(RAG_SYSTEM_PROMPT, user, timeout=self.settings.rag_answer_timeout)
         except LLMError as exc:
             log.warning("LLM yanıt üretemedi; haberlerden çıkarımsal yedek yanıt derlenecek: %s", exc)
-            return fallback(str(exc))
+            return self._fallback_answer(question, ordered, citations, entities, str(exc))
+        return self.finish_answer(text, question, ordered, citations, entities=entities)
+
+    @staticmethod
+    def _fallback_answer(
+        question: str,
+        ordered: Sequence[RankedDoc],
+        citations: Sequence[Citation],
+        entities: Sequence[str] = (),
+        reason: str = "",
+    ) -> tuple[str, str]:
+        return (
+            extractive_answer(ordered, citations, reason=reason, question=question, entities=entities),
+            FALLBACK_MODEL,
+        )
+
+    def finish_answer(
+        self,
+        raw: str,
+        question: str,
+        ordered: Sequence[RankedDoc],
+        citations: Sequence[Citation],
+        *,
+        entities: Sequence[str] = (),
+    ) -> tuple[str, str]:
+        """Model metnini temizler, kısaltır ve sayısal olarak doğrular; olmuyorsa çıkarımsal yedeğe düşer."""
+
+        def fallback(reason: str = "") -> tuple[str, str]:
+            return self._fallback_answer(question, ordered, citations, entities, reason)
+
+        text = normalize_ws(raw)
         if not text:
             log.warning("LLM boş yanıt döndürdü; çıkarımsal yedek yanıt derlenecek")
             return fallback()

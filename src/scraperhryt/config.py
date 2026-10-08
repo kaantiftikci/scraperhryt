@@ -102,10 +102,9 @@ class Settings(BaseSettings):
     punto_base_url: str = "https://12punto.com.tr"
     # 12punto'nun /rss/<kategori> beslemesi ve /<kategori> listesi olan tüm bölümler. Karışık /rss yalnızca son
     # 20 haberi verdiğinden listede olmayan bir bölüm, tarama aralığı uzadığında sessizce kaçar.
+    # Yalnızca gündemle ilgili bölümler; spor, otomotiv, gurme, seyahat, yaşam vb. taranmaz.
     punto_categories: str = (
-        "gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,"
-        "yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,"
-        "otomotiv,seyahat,gurme,trend-bilgi-kapsulu"
+        "gundem,siyaset,secim,ekonomi,dunya,adalet-hukuk,kulis,turkiye,kamu-gundemi,yerel-haberler,egitim,saglik,is-dunyasi"
     )
 
     # ---- Alarm katmanı ----
@@ -132,6 +131,9 @@ class Settings(BaseSettings):
     # Soru-cevap süre sınırları (sn). Ollama skorlayıcıyla paylaşıldığından istek kuyrukta bekleyebilir; sınır
     # aşılınca yeniden yazma yerine soru sözcükleri, model yanıtı yerine haber metninden çıkarımsal yanıt kullanılır.
     rag_rewrite_timeout: float = 20.0
+    # Soruyu LLM ile arama terimlerine çevirme adımı. Anlamsal arama (kNN) açıkken gerekmez; kapalıyken soru
+    # sözcükleri kullanılır ve yanıt başına bir LLM çağrısı (5-20 sn) kazanılır.
+    rag_query_rewrite: bool = False
     # Reranker (çapraz kodlayıcı, ör. bge-reranker-v2-m3): bulunan adayları soruyla birlikte okuyup yeniden sıralar.
     # RERANKER_URL boşsa kapalı. API: "llamacpp" (llama-server --reranking; Jina/Cohere uyumlu /v1/rerank) ya da
     # "tei" (HuggingFace Text Embeddings Inference /rerank).

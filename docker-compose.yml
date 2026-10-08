@@ -179,6 +179,9 @@ services:
     command: ["scraperhryt", "score"]
     stop_grace_period: ${LLM_STOP_GRACE:-200s}
     depends_on: *app-depends
+    # Paralel skorlayıcı sayısı: LLM sunucusu eşzamanlı istekleri kaldırıyorsa skorlama o kadar hızlanır.
+    deploy:
+      replicas: ${SCORER_REPLICAS:-2}
 
   alarm:
     <<: *app

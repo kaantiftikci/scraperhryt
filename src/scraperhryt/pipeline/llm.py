@@ -18,8 +18,9 @@ import logging
 import math
 import re
 import ssl
+import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -352,6 +353,44 @@ class OllamaClient:
             raise LLMBadOutput("Ollama /api/generate 'response' alanı döndürmedi")
         return response.strip()
 
+    def stream_text(self, system: str, user: str, *, timeout: float | None = None) -> Iterator[str]:
+        """``/api/generate`` akış modunda; metin parçalarını geldikçe verir. ``timeout`` toplam süre sınırıdır."""
+        payload = {
+            "model": self._model,
+            "prompt": user,
+            "system": system,
+            "stream": True,
+            "options": self._options(None, None),
+        }
+        limit = timeout if timeout is not None else self.settings.ollama_timeout
+        deadline = time.monotonic() + limit
+        path = "/api/generate"
+        try:
+            with self._client.stream("POST", path, json=payload, timeout=limit) as resp:
+                if resp.status_code >= 400:
+                    resp.read()
+                    self._parse(resp, path)  # hata metniyle LLMUnavailable fırlatır
+                for line in resp.iter_lines():
+                    if time.monotonic() > deadline:
+                        raise LLMUnavailable(f"Ollama yanıtı {limit:.0f} sn içinde tamamlanmadı ({path})")
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except ValueError as exc:
+                        raise LLMBadOutput(f"Ollama akışında JSON olmayan satır ({path})") from exc
+                    if chunk.get("error"):
+                        raise LLMUnavailable(f"Ollama hata döndürdü ({path}): {chunk['error']}")
+                    piece = chunk.get("response")
+                    if isinstance(piece, str) and piece:
+                        yield piece
+                    if chunk.get("done"):
+                        return
+        except httpx.TimeoutException as exc:
+            raise LLMUnavailable(f"Ollama zaman aşımı (POST {path}): {self._describe(exc)}") from exc
+        except httpx.TransportError as exc:
+            raise LLMUnavailable(f"Ollama'ya bağlanılamadı ({self._display_url}{path}): {self._describe(exc)}") from exc
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Metinleri vektörler; boş metinler için sıfır vektör döner (sıra ve uzunluk korunur)."""
         if self._embed_client is not None:
@@ -548,6 +587,11 @@ class FakeOllama:
         if isinstance(out, dict):
             return json.dumps(out, ensure_ascii=False)
         raise LLMBadOutput(f"FakeOllama responder desteklenmeyen tür döndürdü: {type(out).__name__}")
+
+    def stream_text(self, system: str, user: str, *, timeout: float | None = None) -> Iterator[str]:
+        text = self.generate_text(system, user, timeout=timeout)
+        for match in re.finditer(r"\S+\s*", text):
+            yield match.group(0)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         self._ensure_available()

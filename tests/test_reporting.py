@@ -5,17 +5,26 @@ Ağ yok: InMemoryStore + InMemoryBroker + FakeOllama + fastapi.testclient.
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from scraperhryt.broker import InMemoryBroker, Message, Queue, Reject, Retry, RoutingKey
 from scraperhryt.config import Settings
 from scraperhryt.models import AlarmEvent, LLMVerdict, NewsRecord, Report, Stage
-from scraperhryt.pipeline.llm import FakeOllama, HeuristicLLM, LLMBadOutput, LLMUnavailable, hashed_vector
+from scraperhryt.pipeline.llm import (
+    FakeOllama,
+    HeuristicLLM,
+    LLMBadOutput,
+    LLMUnavailable,
+    OllamaClient,
+    hashed_vector,
+)
 from scraperhryt.reporting import prompts
 from scraperhryt.reporting import service as reporting_service
 from scraperhryt.reporting.api import create_app, score_class
@@ -110,7 +119,10 @@ def unavailable_responder(system: str, user: str) -> dict[str, Any] | str:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(_env_file=None, alarm_threshold=60, report_digest_every=10, report_digest_minutes=30, rag_top_k=12)
+    return Settings(
+        _env_file=None, alarm_threshold=60, report_digest_every=10, report_digest_minutes=30, rag_top_k=12,
+        rag_query_rewrite=True,
+    )
 
 
 @pytest.fixture
@@ -332,7 +344,7 @@ def test_qa_engine_bounds_ollama_waits_and_falls_back_on_timeout(seeded) -> None
     from scraperhryt.pipeline.llm import OllamaClient
 
     store, records, _ = seeded
-    s = Settings(_env_file=None, rag_top_k=12, rag_rewrite_timeout=7.0, rag_answer_timeout=11.0)
+    s = Settings(_env_file=None, rag_top_k=12, rag_rewrite_timeout=7.0, rag_answer_timeout=11.0, rag_query_rewrite=True)
     waits: dict[str, float] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1110,3 +1122,66 @@ def test_alarm_list_filters_by_keyword() -> None:
     titles = lambda kw: sorted(i["title"] for i in client.get("/alarms", params={"keyword": kw, "include_duplicates": True}).json()["items"])  # noqa: E731
     assert titles("fon") == ["Haber a", "Haber b"] and titles("İHALE") == ["Haber c"] and titles("=bakan") == ["Haber b"]
     assert 'data-kw="fon"' in client.get("/").text
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Hız: sorgu yeniden yazma kapalı, akışlı yanıt
+# ---------------------------------------------------------------------------------------------------------
+def test_query_rewrite_is_skipped_by_default(seeded) -> None:
+    store, records, _ = seeded
+    llm = FakeOllama(responder=fake_responder)
+    answer = QAEngine(Settings(_env_file=None), store, llm).ask(QUESTION)
+    assert not any(system == prompts.QUERY_REWRITE_SYSTEM_PROMPT for _, system, _ in llm.calls)
+    assert answer.answer == FAKE_ANSWER and answer.sources[0].id == records["newest"].id
+
+
+def _events(res) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in res.text.splitlines() if line.strip()]
+
+
+def test_ask_stream_sends_sources_tokens_and_final_answer(settings: Settings, seeded) -> None:
+    store, records, _ = seeded
+    http = TestClient(create_app(settings, store, FakeOllama(responder=fake_responder)))
+    res = http.post("/ask/stream", json={"question": QUESTION, "since_days": 14, "top_k": 5})
+    assert res.status_code == 200 and res.headers["content-type"].startswith("application/x-ndjson")
+    events = _events(res)
+    assert events[0]["type"] == "sources" and events[0]["sources"][0]["id"] == records["newest"].id
+    tokens = [e["text"] for e in events if e["type"] == "token"]
+    assert len(tokens) > 1 and "".join(tokens) == FAKE_ANSWER
+    final = events[-1]
+    assert final["type"] == "answer" and final["answer"]["answer"] == FAKE_ANSWER and final["answer"]["model"] == "fake"
+    assert final["answer"] == {**http.post("/ask", json={"question": QUESTION, "since_days": 14, "top_k": 5}).json(), "generated_at": final["answer"]["generated_at"]}
+    assert http.post("/ask/stream", json={"question": ""}).status_code == 422
+
+
+def test_ask_stream_falls_back_when_llm_fails_mid_stream(settings: Settings, seeded) -> None:
+    store, _, _ = seeded
+
+    class Broken(FakeOllama):
+        def stream_text(self, system, user, *, timeout=None):
+            yield "Yarım "
+            raise LLMUnavailable("bağlantı koptu")
+
+    qa = QAEngine(settings, store, Broken(responder=fake_responder))
+    events = list(qa.stream_answer(qa.prepare(QUESTION)))
+    assert [e["type"] for e in events] == ["sources", "token", "answer"]
+    assert events[-1]["answer"]["model"] == "fallback" and events[-1]["answer"]["answer"]
+
+
+def test_ollama_stream_text_yields_pieces_and_raises_on_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        lines = [{"response": "Merhaba ", "done": False}, {"response": "dünya", "done": False}, {"response": "", "done": True}]
+        return httpx.Response(200, content="\n".join(json.dumps(x) for x in lines).encode())
+
+    client = OllamaClient(Settings(_env_file=None), transport=httpx.MockTransport(handler))
+    assert list(client.stream_text("s", "u", timeout=5)) == ["Merhaba ", "dünya"]
+
+    bad = OllamaClient(Settings(_env_file=None), transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom")))
+    try:
+        list(bad.stream_text("s", "u", timeout=5))
+    except LLMUnavailable as exc:
+        assert "500" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("LLMUnavailable bekleniyordu")

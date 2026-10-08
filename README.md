@@ -26,7 +26,7 @@ alarma gitmeyen kayıtlarda bu alanlar **boş kalır** ama nesne yine de hem Rab
 | 3 | Ollama üzerinden çalışan bir LLM ile yorumlatıp RabbitMQ'ya gönder | Türkçe analist istemiyle Ollama (`/api/chat`, JSON modu) 0-100 skor, gerekçe, özet, konu ve varlık üretir; `alarm_score >= ALARM_THRESHOLD` ise alarm | `pipeline/scorer.py`, `pipeline/llm.py` → `q.articles.scored` |
 | 4 | RabbitMQ'dan alarm katmanına alarm gitsin; alarmsa RabbitMQ + Elastic'e, değilse yine RabbitMQ + Elastic'e kaydedilsin | Alarm katmanı **her** kaydı `news-articles` indeksine yazar; alarm olanları ayrıca `news-alarms`'a, `q.alarms` kuyruğuna ve kanallara (log/webhook/Telegram) iletir | `pipeline/alarm.py` → ES + `q.alarms` |
 | 5 | alarmdan sonra raporlama katmanına gelsin; bu katmanın mimarisini geliştir | Alarm özetleri (`alarm_digest`), periyodik raporlar ve isteğe bağlı raporlar Elasticsearch toplulaştırmaları + LLM anlatısıyla üretilir; `news-reports` indeksine ve `q.reports` kuyruğuna yazılır; pano ve API ile sunulur | `reporting/` → ES + `q.reports` |
-| 6 | "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" diyince son gelen içeriklerden yanıt versin | RAG: sorgu yeniden yazma → Türkçe BM25 + yenilik ağırlığı (isteğe bağlı vektör arama) → en yeni haberler önce → kaynak atıflı Türkçe yanıt | `reporting/rag.py`, `scraperhryt ask`, `POST /ask` |
+| 6 | "Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" diyince son gelen içeriklerden yanıt versin | RAG: sorgu yeniden yazma → Türkçe BM25 + yenilik ağırlığı (isteğe bağlı vektör arama) → en yeni haberler önce → kaynak atıflı Türkçe yanıt | `reporting/rag.py`, `scraperhryt ask`, `POST /ask`, `POST /ask/stream` (akışlı) |
 
 ---
 
@@ -232,7 +232,9 @@ Tümü `.env` dosyasından ya da ortamdan okunur (önek yok, büyük/küçük ha
 | `HURRIYET_GUNDEM_RSS` | `https://www.hurriyet.com.tr/rss/gundem` | Hürriyet Gündem RSS adresi. |
 | `HURRIYET_GUNDEM_LISTING` | `https://www.hurriyet.com.tr/gundem/` | Hürriyet Gündem liste sayfası. |
 | `PUNTO_BASE_URL` | `https://12punto.com.tr` | 12punto gerçek alan adı. |
-| `PUNTO_CATEGORIES` | `gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,otomotiv,seyahat,gurme,trend-bilgi-kapsulu` | Taranan 12punto kategorileri (RSS + liste). |
+| `PUNTO_CATEGORIES` | `gundem,siyaset,secim,ekonomi,dunya,adalet-hukuk,kulis,turkiye,kamu-gundemi,yerel-haberler,egitim,saglik,is-dunyasi` | Taranan 12punto kategorileri (RSS + liste); spor, yaşam vb. taranmaz. |
+| `RAG_QUERY_REWRITE` | `false` | Soruyu LLM ile arama terimlerine çevirme; kapalıyken soru sözcükleri + anlamsal arama kullanılır (yanıt 5-20 sn hızlanır). |
+| `SCORER_REPLICAS` | `2` | compose: paralel skorlayıcı sayısı (LLM sunucusu eşzamanlı istekleri kaldırmıyorsa 1). |
 
 ### Alarm kanalları
 

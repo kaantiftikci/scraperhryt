@@ -7,6 +7,7 @@ import logging
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -132,8 +133,48 @@ class ScrapeStats:
         )
 
 
+
+class _Budget:
+    """Tur başına sayfa çekme bütçesi; paralel kaynaklar arasında adil paylaşılır.
+
+    Her kaynağın payı ``ceil(bütçe / kaynak sayısı)``. Bir kaynak payını aşabilir ama yalnızca hâlâ çalışan diğer
+    kaynakların kullanmadığı paylar ayrılmış kalacak kadar bütçe varsa; biten kaynağın artan payı diğerlerine kalır.
+    """
+
+    def __init__(self, total: int, names: list[str]) -> None:
+        self.total = max(0, int(total))
+        self.share = math.ceil(self.total / max(1, len(names))) if self.total else 0
+        self.lock = threading.Lock()
+        self._used = dict.fromkeys(names, 0)
+        self._active = set(names)
+
+    def _reserved_for_others(self, name: str) -> int:
+        return sum(max(0, self.share - self._used[n]) for n in self._active if n != name)
+
+    def available(self, name: str) -> bool:
+        with self.lock:
+            return sum(self._used.values()) < self.total
+
+    def take(self, name: str) -> bool:
+        with self.lock:
+            spent = sum(self._used.values())
+            if spent >= self.total:
+                return False
+            if self._used[name] >= self.share and spent + 1 + self._reserved_for_others(name) > self.total:
+                return False
+            self._used[name] += 1
+            return True
+
+    def used(self, name: str) -> int:
+        return self._used.get(name, 0)
+
+    def finish(self, name: str) -> None:
+        with self.lock:
+            self._active.discard(name)
+
+
 class ScrapeRunner:
-    """Tüm kaynakları sırayla tarar ve ``NewsRecord.to_message()`` mesajlarını ``article.raw`` ile yayınlar.
+    """Tüm kaynakları paralel tarar ve ``NewsRecord.to_message()`` mesajlarını ``article.raw`` ile yayınlar.
 
     - ``SeenStore`` sayesinde son 6 saatte görülüp besleme damgası (RSS modified) değişmeyen bağlantılar hiç
       çekilmez; güncelleme damgası olmayan bağlantılar (12punto: yalnızca pubDate) ise en geç
@@ -141,9 +182,9 @@ class ScrapeRunner:
       Çekilenlerde içerik özeti aynıysa yayınlanmaz, değiştiyse (güncellenen haber) aynı id ile yeniden yayınlanır.
     - ``settings.backfill_days`` (12punto arşiv taraması) ``run_forever``'da yalnızca ilk tamamlanan turda
       uygulanır; sonraki turlar arşivi yeniden taramaz.
-    - ``settings.max_articles_per_run`` tur başına toplam sayfa çekme bütçesidir. Bütçe kaynaklar arasında adil
-      paylaştırılır: her kaynak en fazla ``ceil(kalan bütçe / kalan kaynak sayısı)`` sayfa çeker, kullanılmayan pay
-      sonraki kaynağa devreder (böylece küçük bütçede ikinci kaynak aç kalmaz).
+    - Kaynaklar paralel taranır (kaynak başına bir iş parçacığı); aynı siteye istekler arasındaki bekleme korunur.
+    - ``settings.max_articles_per_run`` tur başına toplam sayfa çekme bütçesidir; kaynaklar arasında adil
+      paylaştırılır (bkz. ``_Budget``), biten kaynağın kullanmadığı pay diğerine kalır.
     - Haber başına hatalar sayılır ve tur devam eder; broker hataları turu keser (``run_forever`` yakalar).
     - ``stop_event`` set edilince tur en geç bir sonraki bağlantıda biter (SIGTERM/SIGINT'te kibar kapanış);
       yayınlama ``SeenStore.mark``'tan önce yapıldığından veri kaybı olmaz, kalanlar sonraki tura kalır.
@@ -242,20 +283,48 @@ class ScrapeRunner:
             log.debug("İlerleme kaydedilemedi", exc_info=True)
 
     def _run_sources(self, stats: ScrapeStats, *, days: int, budget: int, stop_requested) -> None:
-        attempts = 0
-        n_sources = max(1, len(self.sources))
-        for index, source in enumerate(self.sources):
+        """Kaynakları paralel tarar (kaynak başına bir iş parçacığı; site başına bekleme ``HttpClient``'ta korunur)."""
+        if stop_requested():
+            return
+        names = [source.name for source in self.sources]
+        for name in names:
+            stats.source(name)  # istatistik sözlüğü iş parçacıkları başlamadan kurulur
+        self._budget = _Budget(budget, names)
+        self._fractions = dict.fromkeys(names, 0.0)
+        if len(self.sources) <= 1:
+            for source in self.sources:
+                self._scrape_source(source, stats, days=days, stop_requested=stop_requested)
+            return
+        with ThreadPoolExecutor(max_workers=len(self.sources), thread_name_prefix="scrape") as pool:
+            futures = [
+                pool.submit(self._scrape_source, source, stats, days=days, stop_requested=stop_requested)
+                for source in self.sources
+            ]
+            errors = []
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as exc:  # broker hatası vb.: diğer kaynak bitsin, sonra turu kes
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+
+    def _progress(self, stats: ScrapeStats, source: str, fraction: float, phase: str, *, force: bool = False) -> None:
+        self._fractions[source] = min(1.0, max(self._fractions.get(source, 0.0), fraction))
+        overall = sum(self._fractions.values()) / max(1, len(self._fractions))
+        self._report_progress(stats, fraction=overall, source=source, phase=phase, force=force)
+
+    def _scrape_source(self, source: Source, stats: ScrapeStats, *, days: int, stop_requested) -> None:
+        budget = self._budget
+        source_stats = stats.source(source.name)
+        try:
             if stop_requested():
-                break
-            source_stats = stats.source(source.name)
-            remaining_sources = len(self.sources) - index
-            quota = math.ceil((budget - attempts) / remaining_sources) if budget > attempts else 0
-            if quota <= 0:
-                log.warning("Haber bütçesi (%d) doldu; %s bu turda taranmadı", budget, source.name)
+                return
+            if not budget.available(source.name):
+                log.warning("Haber bütçesi (%d) doldu; %s bu turda taranmadı", budget.total, source.name)
                 stats.budget_exhausted = True
-                continue
-            source_attempts = 0
-            self._report_progress(stats, fraction=index / n_sources, source=source.name, phase="keşif", force=True)
+                return
+            self._progress(stats, source.name, 0.0, "keşif", force=True)
             try:
                 links = source.discover(self.client, backfill_days=days)
             except Exception:
@@ -270,23 +339,12 @@ class ScrapeRunner:
             # Yeni keşfedilen haberler önce: birikmiş bekleyen liste güncel haberleri ve alarmları geciktirmesin.
             links = links + pending_links
             log.info("%s: %d bağlantı keşfedildi", source.name, source_stats.discovered)
-            self._report_progress(stats, fraction=index / n_sources, source=source.name, phase="çekme", force=True)
+            self._progress(stats, source.name, 0.0, "çekme", force=True)
             for index_link, link in enumerate(links):
-                within = max(index_link / max(1, len(links)), source_attempts / max(1, quota))
-                self._report_progress(stats, fraction=(index + min(1.0, within)) / n_sources, source=source.name, phase="çekme")
+                within = max(index_link / max(1, len(links)), budget.used(source.name) / max(1, budget.share))
+                self._progress(stats, source.name, within, "çekme")
                 if stop_requested():
                     self._defer(source.name, links[index_link:], "durdurma sinyali: tur yarıda kesildi")
-                    break
-                if source_attempts >= quota:
-                    log.warning(
-                        "Haber bütçesi (%d, %s payı %d) doldu; %s için kalan bağlantılar sonraki tura kaldı",
-                        budget,
-                        source.name,
-                        quota,
-                        source.name,
-                    )
-                    stats.budget_exhausted = True
-                    self._defer(source.name, links[index_link:], "haber bütçesi doldu")
                     break
                 feed_stamp = link.updated_hint or link.published_hint
                 known_date = link.published_hint
@@ -302,15 +360,25 @@ class ScrapeRunner:
                 ):
                     source_stats.unchanged += 1
                     continue
-                attempts += 1
-                source_attempts += 1
+                if not budget.take(source.name):
+                    log.warning(
+                        "Haber bütçesi (%d, %s payı %d) doldu; %s için kalan bağlantılar sonraki tura kaldı",
+                        budget.total, source.name, budget.share, source.name,
+                    )
+                    stats.budget_exhausted = True
+                    self._defer(source.name, links[index_link:], "haber bütçesi doldu")
+                    break
                 if link.id in pending_ids:
-                    stats.retried += 1
+                    with budget.lock:
+                        stats.retried += 1
                 outcome = self._process_link(source, link, source_stats, feed_stamp, days=days)
                 if outcome == "error":
                     self._remember_failure(source.name, link, "çekme hatası")
                 else:
                     self.seen.remove_pending(link.id)
+        finally:
+            budget.finish(source.name)
+            self._progress(stats, source.name, 1.0, "çekme")
 
     # --- bekleyen bağlantılar ---
     def _pending_links(self, source_name: str, *, exclude: set[str]) -> list[DiscoveredLink]:

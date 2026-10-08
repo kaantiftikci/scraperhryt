@@ -16,10 +16,11 @@ başarısızsa raporu yine ``published=false`` ile döndürür (``ReportPublishe
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
@@ -29,7 +30,7 @@ from elasticsearch import ConnectionError as ESConnectionError
 from elasticsearch import TransportError as ESTransportError
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import Path as PathParam
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -494,6 +495,23 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
             "soru-cevap",
             lambda: qa.ask(payload.question, since_days=payload.since_days, top_k=payload.top_k, sources=payload.sources),
         )
+
+    @app.post("/ask/stream", summary="RAG soru-cevap, akış hâlinde (NDJSON: sources → token… → answer)")
+    def ask_stream(payload: AskRequest) -> StreamingResponse:
+        prepared = guarded(
+            "soru-cevap",
+            lambda: qa.prepare(payload.question, since_days=payload.since_days, top_k=payload.top_k, sources=payload.sources),
+        )
+
+        def events() -> Iterator[bytes]:
+            try:
+                for event in qa.stream_answer(prepared):
+                    yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+            except Exception as exc:  # akış başladıktan sonra durum kodu değiştirilemez; hata olay olarak gider
+                log.exception("Akışlı soru-cevap hatası")
+                yield (json.dumps({"type": "error", "detail": type(exc).__name__}) + "\n").encode("utf-8")
+
+        return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # --- pano ---
     @app.get("/scraper/status", summary="Kazıyıcı durumu: son/sonraki tur, çekilemeyen (bekleyen) haberler, uyarı")

@@ -140,6 +140,9 @@ def test_ask_ui_shows_elapsed_time_and_aborts_after_server_limits() -> None:
 
     s = Settings(_env_file=None, rag_rewrite_timeout=20, rag_answer_timeout=90)
     page = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
+    assert "const ASK_LIMIT_MS = 150000;" in page  # 90 + 60 sn pay (sorgu yeniden yazma kapalı)
+    s = s.model_copy(update={"rag_query_rewrite": True})
+    page = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
     assert "const ASK_LIMIT_MS = 170000;" in page  # 20 + 90 + 60 sn pay
     assert "signal: ctrl.signal" in page and "Yanıt hazırlanıyor…" in page and "AbortError" in page
 
