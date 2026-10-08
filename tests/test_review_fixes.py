@@ -153,3 +153,28 @@ def test_already_ingested_links_are_not_added_to_pending(tmp_path: Path) -> None
     runner.settings = Settings(_env_file=None, state_db_path=settings.state_db_path, max_articles_per_run=2)
     runner.run_once()
     assert seen.pending_count() == 0
+
+
+# 9) unvan ortadaysa kişi adı unvandan sonraki sözcüklerdir ("Ticaret Bakanı Bolat" → "bolat")
+def test_title_in_middle_of_entity_keeps_person_name() -> None:
+    ranked = [
+        rd("Bakan Bolat’tan fon soruşturması iddialarına yanıt"),
+        rd("Ticaret Bakanı Ömer Bolat açıklama yaptı"),
+        rd("Ticaret odası seçimleri başladı"),
+    ]
+    kept = filter_relevant(ranked, terms=[], entities=[], question="Ticaret Bakanı Bolat fon iddialarına ne dedi?")
+    assert [k.doc["title"] for k in kept] == ["Bakan Bolat’tan fon soruşturması iddialarına yanıt", "Ticaret Bakanı Ömer Bolat açıklama yaptı"]
+
+
+# 10) "-(y)la / -(y)le" eki kök bulmada atılır
+def test_light_stem_strips_instrumental_suffix() -> None:
+    from scraperhryt.reporting.rag import light_stem
+
+    assert light_stem("saldırılarıyla") == "saldır"
+    assert light_stem("ölümüyle") == "ölüm"
+    assert light_stem("kriziyle") == "kriz"
+    kept = filter_relevant(
+        [rd("Başakşehir'deki okul saldırısında yeni ayrıntılar"), rd("Okul kantininde denetim")],
+        terms=[], entities=[], question="Okul saldırılarıyla ilgili son gelişmeler neler?",
+    )
+    assert [k.doc["title"] for k in kept] == ["Başakşehir'deki okul saldırısında yeni ayrıntılar"]

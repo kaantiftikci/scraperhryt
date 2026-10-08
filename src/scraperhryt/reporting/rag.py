@@ -689,6 +689,17 @@ _TITLE_WORDS = frozenset(
 )
 
 
+def _name_words(words: Sequence[str]) -> list[str]:
+    """Unvanlı ifadeden kişi adı: son unvandan sonraki sözcükler ("ticaret bakanı bolat" → ["bolat"]).
+
+    Unvandan önceki sözcükler (bakanlık, kurum) ada eklenmez; aksi hâlde aranan "ticaret bolat" hiçbir haberde
+    bitişik geçmez. Unvandan sonra sözcük yoksa ("bolat bakan") unvanlar atılmış sözcükler kullanılır.
+    """
+    last = max((i for i, w in enumerate(words) if w in _TITLE_WORDS), default=-1)
+    after = list(words[last + 1 :])
+    return after or [w for w in words if w not in _TITLE_WORDS]
+
+
 def _is_generic(word: str) -> bool:
     return any(word.startswith(stem.strip()) for stem in _GENERIC_STEMS)
 
@@ -766,7 +777,7 @@ def relevance_tiers(
         words = [w for w in tr_lower(ent).replace("'", " ").replace("’", " ").split() if w not in _QUESTION_STOPWORDS]
         if not words:
             continue
-        names = [w for w in words if w not in _TITLE_WORDS]
+        names = _name_words(words)
         if names and len(names) < len(words):
             # "Bakan Fidan" → "fidan": haberde unvan farklı çekimle ve araya ad girerek geçer.
             phrases.append(" ".join(names))
@@ -854,6 +865,7 @@ class QuestionSignals:
 
 # Hafif Türkçe kök bulucu için ekler (uzundan kısaya); kök en az 4 harf kalır.
 _STEM_SUFFIXES = (
+    "sıyla", "siyle", "suyla", "süyle", "ıyla", "iyle", "uyla", "üyle", "yla", "yle",
     "ndaki", "ndeki", "ndan", "nden", "ları", "leri", "nın", "nin", "nun", "nün", "nda", "nde",
     "dan", "den", "tan", "ten", "lar", "ler", "da", "de", "ta", "te", "ın", "in", "un", "ün",
     "sı", "si", "su", "sü", "ma", "me", "la", "le", "ı", "i", "u", "ü",
@@ -891,7 +903,7 @@ def question_signals(question: str, entities: Sequence[str] = ()) -> QuestionSig
     entity_words: set[str] = set()
     for ent in grounded:
         words = [w for w in tr_lower(ent).replace("'", " ").replace("’", " ").split() if w not in _QUESTION_STOPWORDS]
-        names = [w for w in words if w not in _TITLE_WORDS] or words
+        names = _name_words(words) or words
         if not names:
             continue
         entity_words.update(names)
