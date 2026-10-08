@@ -1114,3 +1114,16 @@ def test_scrape_stats_summary_is_turkish() -> None:
     text = stats.summary()
     assert "Kazıma turu" in text and "yayınlanan=2" in text and "hata=1" in text
     assert stats.published == 2 and stats.errors == 1 and stats.discovered == 0
+
+
+def test_punto_skips_excluded_sections_from_mixed_feed(settings: Settings) -> None:
+    source = PuntoSource(settings.model_copy(update={"punto_categories": "gundem,spor", "punto_excluded_categories": "spor"}))
+    assert source.categories == ["gundem"]  # dışlanan bölümün beslemesi/listesi hiç istenmez
+    links = [
+        DiscoveredLink(url="https://12punto.com.tr/spor/mhk-istifa-1"),
+        DiscoveredLink(url="https://12punto.com.tr/gundem/fon-haberi-2"),
+    ]
+    assert [link.url for link in source._finalize(links, None)] == ["https://12punto.com.tr/gundem/fon-haberi-2"]
+    assert source.fetch_article(None, links[0]) is None  # bekleyen listeden gelen spor haberi çekilmez
+    keep_all = PuntoSource(settings.model_copy(update={"punto_excluded_categories": ""}))
+    assert len(keep_all._finalize(links, None)) == 2

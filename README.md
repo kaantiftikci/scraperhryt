@@ -233,6 +233,7 @@ Tümü `.env` dosyasından ya da ortamdan okunur (önek yok, büyük/küçük ha
 | `HURRIYET_GUNDEM_LISTING` | `https://www.hurriyet.com.tr/gundem/` | Hürriyet Gündem liste sayfası. |
 | `PUNTO_BASE_URL` | `https://12punto.com.tr` | 12punto gerçek alan adı. |
 | `PUNTO_CATEGORIES` | `gundem,siyaset,secim,ekonomi,dunya,adalet-hukuk,kulis,turkiye,kamu-gundemi,yerel-haberler,egitim,saglik,is-dunyasi` | Taranan 12punto kategorileri (RSS + liste); spor, yaşam vb. taranmaz. |
+| `PUNTO_EXCLUDED_CATEGORIES` | `spor` | Karışık RSS'ten gelse de alınmayan 12punto bölümleri. |
 | `RAG_QUERY_REWRITE` | `false` | Soruyu LLM ile arama terimlerine çevirme; kapalıyken soru sözcükleri + anlamsal arama kullanılır (yanıt 5-20 sn hızlanır). |
 | `SCORER_REPLICAS` | `2` | compose: paralel skorlayıcı sayısı (LLM sunucusu eşzamanlı istekleri kaldırmıyorsa 1). |
 

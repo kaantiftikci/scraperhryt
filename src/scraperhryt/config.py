@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     punto_categories: str = (
         "gundem,siyaset,secim,ekonomi,dunya,adalet-hukuk,kulis,turkiye,kamu-gundemi,yerel-haberler,egitim,saglik,is-dunyasi"
     )
+    # Bu bölümlerin haberleri karışık RSS'ten gelse de alınmaz (adresteki kategoriye göre). Anahtar kelimeler
+    # arasında sporla ilgili bir kelime yok; spor haberi izlenecekse buradan çıkarın.
+    punto_excluded_categories: str = "spor"
 
     # ---- Alarm katmanı ----
     alarm_webhook_url: str = ""  # genel JSON webhook (Slack/Discord/Mattermost uyumlu "text" alanı da gönderilir)
@@ -157,6 +160,10 @@ class Settings(BaseSettings):
     @property
     def punto_category_list(self) -> list[str]:
         return _split_csv(self.punto_categories)
+
+    @property
+    def punto_excluded_category_list(self) -> list[str]:
+        return [c.lower() for c in _split_csv(self.punto_excluded_categories)]
 
 
 @lru_cache(maxsize=1)

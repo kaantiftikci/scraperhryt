@@ -116,7 +116,8 @@ class PuntoSource:
         self.settings = settings or get_settings()
         self.base_url = self.settings.punto_base_url.rstrip("/")
         self.host = urlsplit(self.base_url).netloc.lower().removeprefix("www.")
-        self.categories = list(self.settings.punto_category_list)
+        self.excluded = set(self.settings.punto_excluded_category_list)
+        self.categories = [c for c in self.settings.punto_category_list if c.lower() not in self.excluded]
 
     # --- URL ---
     def normalize_url(self, href: str | None) -> str | None:
@@ -134,6 +135,10 @@ class PuntoSource:
     @staticmethod
     def _category_from_path(url: str) -> str:
         return urlsplit(url).path.strip("/").split("/", 1)[0]
+
+    def is_excluded(self, url: str) -> bool:
+        """Haber dışlanan bir bölümde mi (ör. ``/spor/...``)?"""
+        return self._category_from_path(url).lower() in self.excluded
 
     # --- keşif ---
     def discover(
@@ -191,9 +196,11 @@ class PuntoSource:
             max(empty_days).isoformat(),
         )
 
-    @staticmethod
-    def _finalize(links: list[DiscoveredLink], limit: int | None) -> list[DiscoveredLink]:
-        unique = dedupe_links(links)
+    def _finalize(self, links: list[DiscoveredLink], limit: int | None) -> list[DiscoveredLink]:
+        all_links = dedupe_links(links)
+        unique = [link for link in all_links if not self.is_excluded(link.url)]
+        if len(unique) < len(all_links):
+            log.info("12punto: %s bölümünden %d bağlantı atlandı", ", ".join(sorted(self.excluded)), len(all_links) - len(unique))
         return unique[:limit] if limit is not None else unique
 
     def _fetch_feed(self, client: HttpClient, url: str, category: str) -> list[DiscoveredLink]:
@@ -336,6 +343,8 @@ class PuntoSource:
 
     # --- haber ---
     def fetch_article(self, client: HttpClient, link: DiscoveredLink) -> NewsRecord | None:
+        if self.is_excluded(link.url):
+            return None  # önceki turlardan bekleyen listede kalmış dışlanan bölüm haberi: çekilmez, listeden düşer
         html = client.get_text(link.url)
         return self.parse_article(html, link)
 
