@@ -510,6 +510,8 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         try:
             alarms = [_alarm_view(doc) for doc in store.recent_alarms(size=DASHBOARD_ALARMS)]
             reports = [_report_view(doc) for doc in store.list_reports(size=DASHBOARD_REPORTS)]
+            # Ekranda pencere gösterildiği için en yeni pencere (bitişi) önce; eşitse en son üretilen.
+            reports.sort(key=lambda r: (_sort_ts(r["window_end"]), _sort_ts(r["generated_at"])), reverse=True)
         except Exception as exc:
             log.error("Arayüz verisi alınamadı: %s", exc)
             error = f"Veri alınamadı: {type(exc).__name__}: {exc}"
@@ -593,6 +595,11 @@ def split_narrative(text: str) -> tuple[str, str]:
     if len(lines) > 1 and _SUMMARY_HEAD_RE.match(lines[0] + ":"):
         summary = " ".join(lines[1:])
     return " ".join(summary.split()), "\n\n".join(rest)
+
+
+def _sort_ts(value: Any) -> float:
+    parsed = parse_datetime(value)
+    return parsed.timestamp() if parsed else 0.0
 
 
 def _safe_bool(fn: Callable[[], bool], what: str) -> bool:

@@ -1075,3 +1075,17 @@ def test_split_narrative_separates_executive_summary_from_sections() -> None:
     assert details.startswith("Öne çıkan gelişmeler:") and "Dağılım: hurriyet 40" in details
     assert split_narrative("**Yönetici özeti:** Kısa özet.\n\n## Dağılım\nx") == ("Kısa özet.", "Dağılım\nx")
     assert split_narrative("") == ("", "")
+
+
+def test_dashboard_lists_reports_newest_window_first() -> None:
+    from datetime import timedelta
+
+    from scraperhryt.models import utcnow
+
+    store, now = InMemoryStore(), utcnow()
+    for rid, hours_ago, generated_ago in (("eski", 30, 0), ("yeni", 1, 5), ("orta", 10, 1)):
+        store.index_report(
+            Report(report_id=rid, kind="periodic", window_start=now - timedelta(hours=hours_ago + 24), window_end=now - timedelta(hours=hours_ago), generated_at=now - timedelta(minutes=generated_ago), narrative=f"Yönetici özeti: rapor-{rid}")
+        )
+    html = TestClient(create_app(Settings(_env_file=None), store, FakeOllama())).get("/").text
+    assert html.index("rapor-yeni") < html.index("rapor-orta") < html.index("rapor-eski")
