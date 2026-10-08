@@ -39,7 +39,7 @@ from ..config import Settings
 from ..models import Answer, Report, utcnow
 from ..pipeline.llm import LLM, LLMBadOutput, LLMUnavailable
 from ..store import ArticleStore, SearchHit
-from ..textutil import excerpt
+from ..textutil import excerpt, tr_lower
 from .builder import ReportBuilder
 from .prompts import (
     flat_text,
@@ -429,9 +429,12 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         include_duplicates: Annotated[bool, Query(description="Tekrar (duplicate_of dolu) alarmları da listele")] = False,
         needs_review: Annotated[bool | None, Query(description="Yalnızca insan incelemesi önerilenler")] = None,
         event_id: Annotated[str | None, Query(description="Belirli bir olay kümesi")] = None,
+        keyword: Annotated[str | None, Query(description="Yalnızca bu anahtar kelimeyle yakalanan alarmlar")] = None,
     ) -> AlarmsResponse:
         since = utcnow() - timedelta(hours=since_hours) if since_hours else None
-        fetch = size if (min_score is None and include_duplicates and needs_review is None and not event_id) else max(size * 5, 100)
+        wanted_kw = _keyword_key(keyword) if keyword else ""
+        unfiltered = min_score is None and include_duplicates and needs_review is None and not event_id and not wanted_kw
+        fetch = size if unfiltered else max(size * 5, 200)
         docs = guarded("alarm listesi", lambda: store.recent_alarms(since=since, size=fetch))
         items: list[dict[str, Any]] = []
         for doc in docs:
@@ -442,6 +445,8 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
             if needs_review is not None and bool(doc.get("needs_review")) != needs_review:
                 continue
             if event_id and doc.get("event_id") != event_id:
+                continue
+            if wanted_kw and wanted_kw not in {_keyword_key(k) for k in doc.get("matched_keywords") or []}:
                 continue
             item = dict(doc)
             if not include_content:
@@ -597,6 +602,11 @@ def split_narrative(text: str) -> tuple[str, str]:
     if len(lines) > 1 and _SUMMARY_HEAD_RE.match(lines[0] + ":"):
         summary = " ".join(lines[1:])
     return " ".join(summary.split()), "\n\n".join(rest)
+
+
+def _keyword_key(keyword: Any) -> str:
+    """Anahtar kelime karşılaştırma anahtarı: eşleşme öneki ("=", "~") atılır, Türkçe küçük harf."""
+    return tr_lower(str(keyword or "").strip().lstrip("=~"))
 
 
 def _sort_ts(value: Any) -> float:

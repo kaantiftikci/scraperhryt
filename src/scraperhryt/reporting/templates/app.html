@@ -116,6 +116,9 @@
     #ask-result:empty, #ask-note:empty { display: none; }
     .kw-list { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; color: var(--muted); }
     .kw-list > span:first-child { margin-right: 4px; }
+    .kw-list button.chip { background: none; cursor: pointer; font: 500 12px var(--font-data); }
+    .kw-list button.chip:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .kw-list button.chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
     .reports { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
     .reports > .empty { grid-column: 1 / -1; }
     .report { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -183,7 +186,7 @@
   </section>
 
   <section class="panel" id="panel-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
-    <div class="kw-list"><span>Alarm anahtar kelimeleri</span>{% for k in keywords %}<span class="chip kw">{{ k }}</span>{% endfor %}</div>
+    <div class="kw-list"><span>Alarm anahtar kelimeleri</span>{% for k in keywords %}<button type="button" class="chip kw" data-kw="{{ k }}" aria-pressed="false" title="Yalnızca bu kelimeyle yakalanan alarmları göster">{{ k }}</button>{% endfor %}</div>
     <form class="bar" id="alarm-form">
       <div class="filters-grid">
         <div class="field"><label for="alarm-hours">Son N saat</label><input id="alarm-hours" type="number" min="1" max="8760" value="48"></div>
@@ -396,16 +399,24 @@
   async function loadAlarms(ev) {
     if (ev) ev.preventDefault();
     const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 99, include_duplicates: $("alarm-dups").value });
+    if (activeKeyword) p.set("keyword", activeKeyword);
     $("alarm-note").textContent = "Yükleniyor…";
     try {
       const r = await fetch("/alarms?" + p.toString());
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const data = await r.json();
-      $("alarm-note").textContent = `${data.count} alarm`;
-      $("alarms").innerHTML = data.items.length ? data.items.map(renderAlarm).join("") : `<p class="empty">Bu aralıkta alarm yok.</p>`;
+      $("alarm-note").textContent = activeKeyword ? `"${activeKeyword}" kelimesiyle yakalanan ${data.count} alarm` : `${data.count} alarm`;
+      $("alarms").innerHTML = data.items.length ? data.items.map(renderAlarm).join("") : `<p class="empty">${activeKeyword ? "Bu kelimeyle bu aralıkta alarm yok." : "Bu aralıkta alarm yok."}</p>`;
     } catch (e) { $("alarm-note").textContent = "Alarmlar yüklenemedi: " + e.message; }
   }
   $("alarm-form").addEventListener("submit", loadAlarms);
+  /* anahtar kelimeye tıklayınca yalnızca o kelimeyle yakalanan alarmlar; tekrar tıklayınca hepsi */
+  let activeKeyword = "";
+  document.querySelectorAll(".kw-list button.chip").forEach((b) => b.addEventListener("click", () => {
+    activeKeyword = activeKeyword === b.dataset.kw ? "" : b.dataset.kw;
+    document.querySelectorAll(".kw-list button.chip").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.kw === activeKeyword)));
+    loadAlarms();
+  }));
 
   loadStatus();
   search();

@@ -1094,5 +1094,19 @@ def test_dashboard_lists_reports_newest_window_first() -> None:
 def test_dashboard_shows_alarm_keywords_and_keyword_placeholder() -> None:
     s = Settings(_env_file=None, keywords="bakan,fon,=TMSF,re:kayy[ıi]m")
     html = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
-    assert "Alarm anahtar kelimeleri" in html and '<span class="chip kw">TMSF</span>' in html and "kayy" not in html
+    assert "Alarm anahtar kelimeleri" in html and 'data-kw="TMSF"' in html and "kayy" not in html
     assert "Fon soruşturmasında son durum ne?" in html and "Kılıçdaroğlu arasındaki" not in html
+
+
+def test_alarm_list_filters_by_keyword() -> None:
+    from datetime import UTC, datetime
+
+    store = InMemoryStore()
+    for slug, kws in (("a", ["fon"]), ("b", ["bakan", "fon"]), ("c", ["ihale"])):
+        rec = make_record(slug, f"Haber {slug}", "metin", published=datetime.now(UTC), score=80, keywords=kws)
+        store.index_record(rec)
+        store.index_alarm(AlarmEvent.from_record(rec))
+    client = TestClient(create_app(Settings(_env_file=None), store, FakeOllama()))
+    titles = lambda kw: sorted(i["title"] for i in client.get("/alarms", params={"keyword": kw, "include_duplicates": True}).json()["items"])  # noqa: E731
+    assert titles("fon") == ["Haber a", "Haber b"] and titles("İHALE") == ["Haber c"] and titles("=bakan") == ["Haber b"]
+    assert 'data-kw="fon"' in client.get("/").text
