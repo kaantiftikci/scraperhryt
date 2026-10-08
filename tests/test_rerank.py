@@ -154,3 +154,77 @@ def test_ollama_tls_options_and_path_prefix() -> None:
     with OllamaClient(s, transport=httpx.MockTransport(handler)) as client:
         assert client.chat_json("s", "u") == {"ok": 1}
     assert seen == ["/llm/api/chat"]
+
+
+class _ScoreReranker:
+    """Belge metnindeki ifadeye göre sabit puan veren sahte reranker (puan ölçeği bilerek ham logit gibi)."""
+
+    def __init__(self, table: dict[str, float], default: float = -8.0) -> None:
+        self.table = table
+        self.default = default
+        self.calls: list[int] = []
+
+    def scores(self, query: str, documents: list[str]) -> list[float]:
+        self.calls.append(len(documents))
+        return [next((v for k, v in self.table.items() if k in d), self.default) for d in documents]
+
+
+def _rd(i: str, title: str) -> RankedDoc:
+    return RankedDoc(doc={"id": i, "title": title, "content": ""}, score=1.0)
+
+
+def test_select_rescues_gate_document_only_when_reranker_rates_it_above_strict_median() -> None:
+    from scraperhryt.store import InMemoryStore
+
+    strict = [_rd("s1", "güçlü A"), _rd("s2", "orta B"), _rd("s3", "zayıf C")]
+    synonym, noise = _rd("g1", "eş anlamlı D"), _rd("g2", "gürültü E")
+    reranker = _ScoreReranker({"güçlü": 6.0, "orta": 2.0, "zayıf": -3.0, "eş anlamlı": 4.0, "gürültü": 0.5})
+    qa = QAEngine(Settings(_env_file=None), InMemoryStore(), FakeOllama(), reranker=reranker)
+    picked = [d.doc["id"] for d in qa.select("soru", strict + [synonym, noise], strict, 10)]
+    # g1 (4.0) sıkı haberlerin ortancasından (2.0) yüksek → geri alınır; g2 (0.5) düşük → elenir; sıkı haberler kalır.
+    assert picked == ["s1", "g1", "s2", "s3"]
+    assert [d.doc["id"] for d in qa.select("soru", strict + [synonym, noise], strict, 2)] == ["s1", "g1"]
+    # reranker yoksa ya da hata verirse yalnızca sözcüksel sıkı katman
+    off = QAEngine(Settings(_env_file=None), InMemoryStore(), FakeOllama(), reranker=None)
+    assert [d.doc["id"] for d in off.select("soru", strict + [synonym], strict, 10)] == ["s1", "s2", "s3"]
+
+    class Failing:
+        def scores(self, query, documents):
+            return None
+
+    failing = QAEngine(Settings(_env_file=None), InMemoryStore(), FakeOllama(), reranker=Failing())
+    assert [d.doc["id"] for d in failing.select("soru", strict + [synonym], strict, 10)] == ["s1", "s2", "s3"]
+
+
+def test_synonym_worded_news_reaches_answer_with_reranker() -> None:
+    """Soru "soruşturma ... ortaya çıkan kişi" der, haber "vurgun ... isim ... ortaya çıktı" der: sözcüksel eşik
+    haberi eler, reranker onu en ilgili bulur ve haber kaynaklara girer; konu dışı haber girmez."""
+    from datetime import UTC, datetime, timedelta
+
+    from scraperhryt.models import NewsRecord
+    from scraperhryt.store import InMemoryStore
+
+    store = InMemoryStore()
+    now = datetime.now(UTC)
+    items = [
+        ("hedef", "Fon vurgununda 2 isim daha ortaya çıktı", "Fon krizinde iki bakanın adı Meclis gündemine taşındı.", 1),
+        ("s1", "Fon soruşturmasında Kaya ve eşi ifade verdi", "Fon soruşturması kapsamında iki kişi ifade verdi; yeni ayrıntılar ortaya çıktı.", 5),
+        ("s2", "Fon soruşturmasında dezenformasyon uyarısı", "Fon soruşturması hakkında asılsız iddialar yayan kişiler hakkında işlem; belgeler ortaya çıktı.", 6),
+        ("s3", "Fon soruşturmasında yeni inceleme", "Fon soruşturmasında üç kişinin hisse hareketleri ortaya çıktı.", 7),
+        ("konu-dışı", "Maltepe'de çöken binada kaçak kat ortaya çıktı", "Çöken binada iki kişi hayatını kaybetti.", 2),
+    ]
+    for slug, title, content, hours in items:
+        store.index_record(NewsRecord.new(source="12punto", content_url=f"https://12punto.com.tr/gundem/{slug}", title=title, content=content, published_at=now - timedelta(hours=hours)))
+    reranker = _ScoreReranker({"vurgununda 2 isim": 7.0, "Kaya ve eşi": 3.0, "dezenformasyon": 1.0, "yeni inceleme": 2.0, "Maltepe": -6.0})
+    s = Settings(_env_file=None, rag_top_k=3)
+    answer = QAEngine(s, store, FakeOllama(responder=lambda system, user: "Yanıt [1]."), reranker=reranker).ask(
+        "fon soruşturmasında en son ortaya çıkan 2 kişi kim"
+    )
+    titles = [c.title for c in answer.sources]
+    assert "Fon vurgununda 2 isim daha ortaya çıktı" in titles
+    assert not any("Maltepe" in t for t in titles)
+    # aynı soru reranker olmadan: eski (yalnızca sözcüksel) davranış korunur
+    plain = QAEngine(s, store, FakeOllama(responder=lambda system, user: "Yanıt [1]."), reranker=None).ask(
+        "fon soruşturmasında en son ortaya çıkan 2 kişi kim"
+    )
+    assert "Fon vurgununda 2 isim daha ortaya çıktı" not in [c.title for c in plain.sources]

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -275,13 +276,16 @@ class QAEngine:
         search_terms = _dedupe(terms + ground_entities(question, entities))[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
         # Süzgeç sonrası top_k dolu kalsın diye iki katı aday getirilir (yeniden yazma terimleri gürültü ekleyebilir).
-        pool = max(size * 2, self.settings.rag_rerank_candidates) if self.reranker else size * 2
+        # Reranker varken sözcüksel eşiğe takılan adaylar da (en çok yarısı kadar) değerlendirilir; havuz buna göre büyür.
+        candidates = self.settings.rag_rerank_candidates
+        pool = max(size * 2, candidates + candidates // 2) if self.reranker else size * 2
         ranked = self.retrieve(question, queries, since=since, size=pool, sources=source_filter)
         promoted = promote_entities(question, [item.doc for item in ranked])
         if promoted:
             log.info("Cümle başındaki özel ad(lar) haberlerden tanındı: %s", promoted)
             entities = _dedupe(list(entities) + promoted)
-        relevant = self.rerank(question, filter_relevant(ranked, terms=terms, entities=entities, question=question), size)
+        gate, strict = relevance_tiers(ranked, terms=terms, entities=entities, question=question)
+        relevant = self.select(question, gate, strict, size)
         if len(relevant) < min(size, len(ranked)):
             log.info("İlgisiz belgeler elendi: %d adaydan %d ilgili haber kaldı", len(ranked), len(relevant))
         ordered = newest_first(relevant)
@@ -300,6 +304,39 @@ class QAEngine:
         )
 
     # --- 2b. yeniden sıralama ---
+    def select(self, question: str, gate: Sequence[RankedDoc], strict: Sequence[RankedDoc], size: int) -> list[RankedDoc]:
+        """Modele gidecek haberleri seçer: sözcüksel süzgeç ile reranker'ın ortak kararı.
+
+        Reranker yoksa (ya da yanıt vermezse) yalnızca sözcüksel olarak soruyu iyi kapsayan ``strict`` haberler
+        kullanılır. Reranker varsa ``strict`` haberlerin yanında, soru sözcüklerinden yalnızca bir kısmını içerdiği
+        için eşiğe takılan ``gate`` haberleri de puanlanır; bunlardan biri, reranker'ın ``strict`` haberlere verdiği
+        ortanca puandan en az o kadar yüksek puan alırsa geri alınır (haber konuyu eş anlamlı sözcüklerle anlatıyordur:
+        "soruşturma" yerine "vurgun"). Eşik puan ölçeğinden bağımsızdır; iki ölçütün de zayıf bulduğu haber elenir,
+        sözcüksel olarak güçlü haberler eskisi gibi adaydır. Seçilenler reranker puanına göre sıralanıp ilk ``size``
+        tanesi alınır.
+        """
+        limit = self.settings.rag_rerank_candidates
+        core = list(strict[:limit])
+        if self.reranker is None:
+            return core[:size]
+        core_ids = {id(item) for item in strict}
+        extras = [item for item in gate if id(item) not in core_ids][: limit // 2]
+        candidates = core + extras
+        if len(candidates) <= 1:
+            return candidates[:size]
+        scores = self.reranker.scores(question, [rerank_text(item.doc) for item in candidates])
+        if scores is None:
+            return core[:size]
+        bar = statistics.median(scores[: len(core)]) if core else float("-inf")
+        chosen = [i for i in range(len(candidates)) if i < len(core) or scores[i] >= bar]
+        rescued = len(chosen) - len(core)
+        chosen.sort(key=lambda i: scores[i], reverse=True)
+        log.info(
+            "Reranker %d adaydan %d haber seçti (%d tanesi sözcüksel eşiğe takılmıştı, en yüksek skor %.3f)",
+            len(candidates), min(size, len(chosen)), rescued, scores[chosen[0]],
+        )
+        return [candidates[i] for i in chosen[:size]]
+
     def rerank(self, question: str, docs: Sequence[RankedDoc], size: int) -> list[RankedDoc]:
         """Reranker varsa adayları soruyla birlikte okutup en ilgili ``size`` haberi seçer; yoksa sırayı korur."""
         if self.reranker is None or len(docs) <= 1:
@@ -701,7 +738,18 @@ def promote_entities(question: str, docs: Sequence[Mapping[str, Any]]) -> list[s
 def filter_relevant(
     ranked: Sequence[RankedDoc], *, terms: Sequence[str], entities: Sequence[str], question: str = ""
 ) -> list[RankedDoc]:
-    """Soruyla ilgisiz belgeleri eler (Türkçe ek toleranslı). Ölçüt yalnızca SORUNUN KENDİSİNE dayanır:
+    """``relevance_tiers``'in sıkı katmanı: sözcüksel ölçütle soruyla ilgili sayılan belgeler."""
+    return relevance_tiers(ranked, terms=terms, entities=entities, question=question)[1]
+
+
+def relevance_tiers(
+    ranked: Sequence[RankedDoc], *, terms: Sequence[str], entities: Sequence[str], question: str = ""
+) -> tuple[list[RankedDoc], list[RankedDoc]]:
+    """``(geçit, sıkı)``: geçit sorunun en az bir anlamlı öğesini içeren belgeler, sıkı bunlardan soruyu en iyi
+    kapsayanlar (aşağıdaki kapsama eşiği). Reranker yoksa yalnızca sıkı katman kullanılır; reranker varsa geçitteki
+    ama eşiğe takılan belgeler (eş anlamlı sözcükle yazılmış haber) reranker'ın yargısıyla geri alınabilir.
+
+    Soruyla ilgisiz belgeleri eler (Türkçe ek toleranslı). Ölçüt yalnızca SORUNUN KENDİSİNE dayanır:
 
     - soruda geçen varlık adları (``ground_entities``) varsa en az biri bütün ifade olarak geçmeli
       (çok kelimeli adın ≥6 harfli soyadı tek başına da yeter);
@@ -734,7 +782,7 @@ def filter_relevant(
         fallback_terms = key_terms(terms, [])
         matcher = KeywordMatcher(fallback_terms) if fallback_terms else None
     if matcher is None:
-        return list(ranked)
+        return list(ranked), list(ranked)
     kept: list[RankedDoc] = []
     for item in ranked:
         doc = item.doc
@@ -742,28 +790,28 @@ def filter_relevant(
         if matcher.matches(text):
             kept.append(item)
     if not question or len(kept) < 2:
-        return kept
+        return kept, kept
     if phrases:
         # Özel ad sorularında adlar birbirinin alternatifidir (TFF ya da MHK geçen haber ilgilidir). Soru adın
         # yanında bir konu da soruyorsa ("Erdoğan FON SORUŞTURMASI hakkında ne dedi?"), konuya da değinen
         # haberler varken yalnızca adı geçen ilgisiz haberler (aynı kişinin başka bir görüşmesi) elenir.
         topic = question_signals(question, grounded)
         if not topic.specific:
-            return kept
+            return kept, kept
         on_topic = [
             item for item in kept
             if any(m.matches(" ".join(flat_text(item.doc.get(k)) for k in ("title", "subtitle", "content")))
                    for m in topic.specific)
         ]
-        return on_topic or kept
+        return kept, (on_topic or kept)
     # Kapsama eşiği: sorunun birden çok belirgin öğesi varsa, en iyi kapsayan habere göre çok az öğe içeren
     # haberler elenir ("Gazeteci tutuklamaları" → yalnız "gazeteci" geçen film haberi düşer).
     signals = question_signals(question, grounded)
     coverage = [doc_relevance(item.doc, signals) for item in kept]
     best = max(coverage)
     if best <= 0:
-        return kept
-    return [item for item, cov in zip(kept, coverage, strict=True) if cov >= 0.6 * best]
+        return kept, kept
+    return kept, [item for item, cov in zip(kept, coverage, strict=True) if cov >= 0.6 * best]
 
 
 def doc_relevance(doc: Mapping[str, Any], signals: QuestionSignals) -> float:
