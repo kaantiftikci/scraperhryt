@@ -347,7 +347,7 @@ def test_extractive_answer_is_short_prose_not_headline_list() -> None:
     store.index_record(b)
     engine = QAEngine(s, store, FakeOllama(responder=lambda sy, u: "Elimdeki haberlerde bu konuda yeterli bilgi yok."))
     answer = engine.ask("Fon soruşturmasında son durum ne?")
-    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer and "[2]" in answer.answer
+    assert answer.answer[:10].replace(".", "").isdigit() and "[1]" in answer.answer and "[2]" in answer.answer
     assert "\n- " not in answer.answer and answer.answer.count(".") <= 5 and "2,5 milyar" in answer.answer
 
 
@@ -424,7 +424,7 @@ def test_listing_or_trailing_refusal_output_becomes_short_summary() -> None:
     store.index_record(make_record("TFF hakem atamalarını erteledi", "MHK üyeleri belirlenemedi.", days_ago=1))
     listing = "[1] TFF toplanıyor.\n\n[2] Özbek tepki gösterdi.\n\n[3] Atamalar ertelendi.\n\nSonuç: Elimdeki haberlerde bu konuda yeterli bilgi yok."
     answer = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"search_terms": ["TFF"], "entities": []} if "search_terms" in sy else listing)).ask("TFF ile MHK krizinde son durum ne?")
-    assert answer.model == "fallback" and answer.answer.startswith("Son gelişme (") and "\n[" not in answer.answer
+    assert answer.model == "fallback" and answer.answer[:10].replace(".", "").isdigit() and "\n[" not in answer.answer
     trailing = "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]. Sonuç: Elimdeki haberlerde bu konuda yeterli bilgi yok."
     answer2 = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"search_terms": ["TFF"], "entities": []} if "search_terms" in sy else trailing)).ask("TFF ile MHK krizinde son durum ne?")
     assert answer2.answer == "TFF, MHK krizi nedeniyle olağanüstü toplantı kararı aldı [1]."
@@ -441,5 +441,5 @@ def test_condense_answer_drops_labels_duplicates_and_caps_length() -> None:
     )
     out = condense_answer(raw)
     assert out.startswith("TFF Yönetim Kurulu olağanüstü toplanacak [1].") and "Özet" not in out and "En güncel" not in out
-    assert out.count("olağanüstü toplanacak") == 1 and out.count("[") == 4 and "Lig bir hafta" not in out
+    assert out.count("olağanüstü toplanacak") == 1 and out.count("[") == 3 and "Dursun Özbek" not in out
     assert condense_answer("Tek cümle [1].") == "Tek cümle [1]."

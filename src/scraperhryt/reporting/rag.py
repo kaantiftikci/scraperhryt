@@ -1058,9 +1058,12 @@ def _strip_leading_refusal(text: str) -> str:
     return stripped if stripped and stripped != text and len(stripped) > 40 else text
 
 
-MAX_ANSWER_SENTENCES = 4
+MAX_ANSWER_SENTENCES = 3
 _LABEL_RE = re.compile(
-    r"^\s*(?:özet|sonuç|en güncel gelişme(?:ler)?|yanıt|cevap)\s*:\s*", re.IGNORECASE
+    r"^\s*(?:(?:özet|sonuç|en güncel gelişme(?:ler)?|yanıt|cevap)\s*:"
+    # Cevaba bilgi katmayan giriş kalıpları: "En güncel gelişme olarak, ...", "Haberlere göre, ..."
+    r"|(?:en (?:güncel|son) gelişme(?:ler)? olarak|(?:verilen |mevcut )?haberlere göre|özetle|sonuç olarak)\s*,)\s*",
+    re.IGNORECASE,
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s*\[\d+\](?:\[\d+\])*\.?)?\s+|\n+")
 
@@ -1073,6 +1076,8 @@ def condense_answer(text: str, max_sentences: int = MAX_ANSWER_SENTENCES) -> str
         sentence = _LABEL_RE.sub("", raw).strip()
         if len(sentence) < 3:
             continue
+        if sentence != raw.strip():
+            sentence = sentence[:1].upper() + sentence[1:]
         pieces.append(sentence)
     kept: list[str] = []
     seen: list[str] = []
@@ -1096,7 +1101,7 @@ def condense_answer(text: str, max_sentences: int = MAX_ANSWER_SENTENCES) -> str
 
 
 def _looks_like_listing(text: str) -> bool:
-    """Yanıt 2-4 cümlelik özet yerine haber haber liste mi (3+ madde/numaralı satır)?"""
+    """Yanıt kısa cevap yerine haber haber liste mi (3+ madde/numaralı satır)?"""
     return len(_LIST_LINE_RE.findall(text)) >= 3
 
 
@@ -1136,13 +1141,12 @@ def extractive_answer(
         body = sentence.rstrip(" .…!?")
         if position == 0:
             stamp = format_tr(doc_timestamp(items[number - 1].doc))
-            parts.append(f"Son gelişme ({stamp}): {body} [{number}].")
+            parts.append(f"{stamp}: {body} [{number}].")
         else:
             parts.append(f"{body} [{number}].")
-    text = " ".join(parts)
     if reason:
-        text += f" (Bu özet haberlerin metninden doğrudan derlendi: {excerpt(reason, 100)}.)"
-    return text
+        log.info("Yanıt haber metninden derlendi: %s", excerpt(reason, 100))  # arayüz bunu notta zaten belirtir
+    return " ".join(parts)
 
 
 def make_snippet(

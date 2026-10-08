@@ -327,7 +327,7 @@ def test_qa_engine_fallback_when_llm_unavailable(settings: Settings, seeded) -> 
 
     assert answer.model == FALLBACK_MODEL
     # Yedek yanıt 2-3 cümlelik özettir: en yeni haber [1] olarak önce gelir, başlık listesi yoktur.
-    assert answer.sources[0].id == records["newest"].id and answer.answer.startswith("Son gelişme (")
+    assert answer.sources[0].id == records["newest"].id and answer.answer[:10].replace(".", "").isdigit()
     assert "[1]" in answer.answer and answer.answer.index("[1]") < answer.answer.index("[2]")
     assert "[1]" in answer.answer
     assert answer.sources[0].id == records["newest"].id
@@ -358,7 +358,7 @@ def test_qa_engine_bounds_ollama_waits_and_falls_back_on_timeout(seeded) -> None
         answer = QAEngine(s, store, llm).ask(QUESTION)
     assert waits == {"/api/chat": 7.0, "/api/generate": 11.0}
     assert answer.model == FALLBACK_MODEL and answer.sources[0].id == records["newest"].id
-    assert answer.answer.startswith("Son gelişme (") and "[1]" in answer.answer
+    assert answer.answer[:10].replace(".", "").isdigit() and "[1]" in answer.answer
 
 
 def test_qa_engine_fallback_when_rewrite_is_bad_json(settings: Settings, seeded) -> None:
@@ -472,7 +472,7 @@ def test_qa_engine_with_heuristic_llm_is_deterministic(settings: Settings, seede
     store, records, _ = seeded
     answer = QAEngine(settings, store, HeuristicLLM(settings)).ask(QUESTION)
     assert answer.model == FALLBACK_MODEL
-    assert answer.sources[0].id == records["newest"].id and answer.answer.startswith("Son gelişme (")
+    assert answer.sources[0].id == records["newest"].id and answer.answer[:10].replace(".", "").isdigit()
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -918,7 +918,7 @@ def test_api_ask_falls_back_without_llm(settings: Settings, seeded) -> None:
     http = TestClient(create_app(settings, store, FakeOllama(available=False)))
     body = http.post("/ask", json={"question": QUESTION}).json()
     assert body["model"] == FALLBACK_MODEL and body["sources"][0]["id"] == records["newest"].id
-    assert body["answer"].startswith("Son gelişme (")
+    assert body["answer"][:10].replace(".", "").isdigit()
 
 
 def test_api_ask_marks_no_evidence_distinct_from_llm_outage(settings: Settings, seeded) -> None:

@@ -57,7 +57,7 @@ def test_extractive_covers_each_relevant_article() -> None:
     lpg = doc("LPG'ye 24 saat içinde ikinci zam", "Otogaz fiyatları büyükşehirlerde 40 liranın üzerine çıktı.", "Akaryakıt piyasasında LPG'ye iki gün üst üste zam geldi.", 1)
     text = extractive_answer([motorin, lpg], [], question="Akaryakıt fiyatlarında son durum ne?")
     assert "[1]" in text and "[2]" in text and "4,95" in text and "40 lira" in text
-    assert text.startswith("Son gelişme (") and text.count("[") <= 3
+    assert text[:10].replace(".", "").isdigit() and text.count("[") <= 3
 
 
 def test_boilerplate_is_never_selected() -> None:

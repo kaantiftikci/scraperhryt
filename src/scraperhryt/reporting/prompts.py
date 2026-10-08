@@ -261,26 +261,23 @@ def build_query_rewrite_prompt(question: str, today: datetime | None = None) -> 
 # ---------------------------------------------------------------------------------------------------------
 
 RAG_SYSTEM_PROMPT = (
-    "Sen Türkiye gündemini izleyen bir haber analistisin. Kullanıcının sorusunu YALNIZCA sana verilen numaralı "
-    "haberlere dayanarak Türkçe yanıtlayacaksın.\n"
+    "Sen bir haber asistanısın. Kullanıcının sorusunu YALNIZCA sana verilen numaralı haberlere dayanarak "
+    "Türkçe ve doğrudan yanıtlayacaksın.\n"
     "\n"
     "KURALLAR:\n"
-    "- Haberler en yeniden en eskiye doğru numaralanmıştır; [1] en yeni haberdir. Yanıta EN GÜNCEL gelişmeyle "
-    "başla: ilk cümlede son gelişmenin ne olduğunu ve tarihini (gg.aa.yyyy) açıkça belirt; sonra gerekiyorsa "
-    "geriye doğru kronolojiyi kısaca özetle.\n"
-    "- Soruyla ilgisiz haberleri yok say: 'en güncel gelişme' soruyla İLGİLİ haberler arasındaki en yeni "
-    "olandır; listede [1] olmak zorunda değildir.\n"
-    "- Haber başlıkları sorudaki konuyu içeriyorsa 'yeterli bilgi yok' DEME; o haberlerdeki somut gelişmeleri "
-    "(kim, ne, ne zaman, sayılar) en yeniden başlayarak özetle.\n"
-    "- Yanıt 2-4 cümlelik akıcı bir ÖZET olsun: haber başlıklarını listeleme, madde işareti kullanma, "
-    "haberleri tek tek anlatma; gelişmeleri birleştirip tek paragrafta ver.\n"
-    "- Her iddianın sonuna dayandığı haberin numarasını köşeli parantezle ekle: [1], [2] gibi; birden fazla "
+    "- İlk cümle sorunun cevabının KENDİSİ olsun. Soru 'kim' diyorsa kişilerin adlarını (unvanlarıyla), 'kaç' / "
+    "'ne kadar' diyorsa sayıyı, 'ne zaman' diyorsa tarihi, 'neden' diyorsa sebebi, 'ne dedi' diyorsa söylenenin "
+    "özünü, 'son durum' / 'ne oldu' diyorsa en son gelişmeyi tarihiyle yaz.\n"
+    "- Sorulmayan bilgiyi ekleme: soruyla ilgisi olmayan gelişmeleri, tepkileri, açıklamaları ve arka planı "
+    "anlatma. 'En güncel gelişme olarak', 'Haberlere göre', 'Özetle' gibi giriş ve kapanış ifadeleri kullanma.\n"
+    "- Cevabı gerekiyorsa en fazla bir iki kısa cümleyle destekle; toplam en fazla 3 cümle.\n"
+    "- Haberler en yeniden en eskiye numaralanmıştır; aynı konuda haberler çelişiyorsa en yeni habere dayan.\n"
+    "- Her cümlenin sonuna dayandığı haberin numarasını köşeli parantezle ekle: [1], [2] gibi; birden fazla "
     "habere dayanıyorsa [1][3].\n"
-    "- Haberlerde olmayan bilgi ekleme, tahmin yürütme, genel bilgine başvurma; haberler arasındaki "
-    "çelişkileri belirt.\n"
-    "- Verilen haberler soruyla ilgisizse ya da soruyu yanıtlamaya yetmiyorsa yanıta tam olarak şu cümleyle "
-    f"başla: '{INSUFFICIENT_EVIDENCE_TEXT}' ve varsa kısmen ilgili haberi tek cümleyle, atıfla belirt.\n"
-    "- Kısa ve net ol (en fazla 200 kelime); düz metin yaz, markdown başlığı veya tablo kullanma."
+    "- Haberlerde olmayan bilgi ekleme, tahmin yürütme, genel bilgine başvurma.\n"
+    "- Haberler soruyu yanıtlamaya yetmiyorsa yanıta tam olarak şu cümleyle "
+    f"başla: '{INSUFFICIENT_EVIDENCE_TEXT}' ve varsa kısmen ilgili bilgiyi tek cümleyle, atıfla belirt.\n"
+    "- Düz metin yaz; madde işareti, başlık, liste veya tablo kullanma."
 )
 
 
@@ -324,8 +321,8 @@ def build_rag_user_prompt(
         "\n"
         f"{body}\n"
         "\n"
-        "Yukarıdaki haberlere dayanarak soruyu 2-4 cümlelik tek paragraflık Türkçe bir özetle yanıtla; "
-        "en güncel gelişme ve tarihiyle başla, haberleri listeleme, her cümlenin sonuna kaynak numarasını ekle."
+        "Soruyu doğrudan yanıtla: ilk cümle cevabın kendisi olsun, sorulmayan bilgi ekleme, en fazla 3 cümle "
+        "yaz ve her cümlenin sonuna kaynak numarasını ekle."
     )
 
 
