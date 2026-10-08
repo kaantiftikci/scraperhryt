@@ -1089,3 +1089,10 @@ def test_dashboard_lists_reports_newest_window_first() -> None:
         )
     html = TestClient(create_app(Settings(_env_file=None), store, FakeOllama())).get("/").text
     assert html.index("rapor-yeni") < html.index("rapor-orta") < html.index("rapor-eski")
+
+
+def test_dashboard_shows_alarm_keywords_and_keyword_placeholder() -> None:
+    s = Settings(_env_file=None, keywords="bakan,fon,=TMSF,re:kayy[ıi]m")
+    html = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
+    assert "Alarm anahtar kelimeleri" in html and '<span class="chip kw">TMSF</span>' in html and "kayy" not in html
+    assert "Fon soruşturmasında son durum ne?" in html and "Kılıçdaroğlu arasındaki" not in html

@@ -515,7 +515,9 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         except Exception as exc:
             log.error("Arayüz verisi alınamadı: %s", exc)
             error = f"Veri alınamadı: {type(exc).__name__}: {exc}"
-        context = {"settings": settings, "alarms": alarms, "reports": reports, "error": error}
+        # Eş anlamlı/regex önekleri ("=", "~", "re:") ekranda gösterilmez; kullanıcı yalnızca kelimeyi görür.
+        keywords = [k.lstrip("=~") for k in settings.keyword_list if not k.startswith("re:")]
+        context = {"settings": settings, "alarms": alarms, "reports": reports, "error": error, "keywords": keywords}
         return templates.TemplateResponse(request, "app.html", context)
 
     return app

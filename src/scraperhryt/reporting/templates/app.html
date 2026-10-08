@@ -114,6 +114,8 @@
     form.ask input { height: 48px; font-size: 16px; }
     form.ask .note { font-size: 13px; }
     #ask-result:empty, #ask-note:empty { display: none; }
+    .kw-list { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; color: var(--muted); }
+    .kw-list > span:first-child { margin-right: 4px; }
     .reports { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
     .reports > .empty { grid-column: 1 / -1; }
     .report { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -162,7 +164,7 @@
     <form class="ask" id="ask-form">
       <label for="question">Soru sor</label>
       <div class="main-row">
-        <input id="question" placeholder="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" minlength="2" required>
+        <input id="question" placeholder="Fon soruşturmasında son durum ne?" minlength="2" required>
         <button class="primary" type="submit" id="ask-btn">Sor</button>
       </div>
       <p class="note" id="ask-note"></p>
@@ -181,6 +183,7 @@
   </section>
 
   <section class="panel" id="panel-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
+    <div class="kw-list"><span>Alarm anahtar kelimeleri</span>{% for k in keywords %}<span class="chip kw">{{ k }}</span>{% endfor %}</div>
     <form class="bar" id="alarm-form">
       <div class="filters-grid">
         <div class="field"><label for="alarm-hours">Son N saat</label><input id="alarm-hours" type="number" min="1" max="8760" value="48"></div>
