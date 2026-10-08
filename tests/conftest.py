@@ -22,6 +22,7 @@ _ISOLATED_ENV = {
     "TELEGRAM_CHAT_ID": "",
     "KEYWORD_ALIASES_PATH": "",  # testler eş anlamlı dosyasını açıkça seçer
     "ALARM_THRESHOLDS_JSON": "",
+    "MAX_ARTICLE_AGE_DAYS": "0",  # sabit tarihli test haberleri zamanla "eski" sayılmasın; yaş testi açıkça ayarlar
 }
 
 

@@ -8,7 +8,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import requests
 
@@ -65,6 +65,7 @@ class SourceStats:
     published: int = 0  # kuyruğa yayınlanan (yeni + güncellenen)
     unchanged: int = 0  # değişmediği için atlanan (son görülme penceresi ya da aynı içerik özeti)
     skipped: int = 0  # çekildi ama kayıt üretilemedi (ayrıştırılamadı)
+    too_old: int = 0  # MAX_ARTICLE_AGE_DAYS'ten eski olduğu için atlanan
     errors: int = 0  # çekme/ayrıştırma hatası
 
 
@@ -116,7 +117,7 @@ class ScrapeStats:
     def summary(self) -> str:
         parts = [
             f"{name}: keşif={s.discovered} çekilen={s.fetched} yayınlanan={s.published} "
-            f"değişmeyen={s.unchanged} atlanan={s.skipped} hata={s.errors}"
+            f"değişmeyen={s.unchanged} atlanan={s.skipped} eski={s.too_old} hata={s.errors}"
             for name, s in self.per_source.items()
         ]
         detail = "; ".join(parts) if parts else "kaynak yok"
@@ -288,6 +289,14 @@ class ScrapeRunner:
                     self._defer(source.name, links[index_link:], "haber bütçesi doldu")
                     break
                 feed_stamp = link.updated_hint or link.published_hint
+                known_date = link.published_hint
+                if known_date is None and (row := self.seen.get(link.id)) and row.get("published_at"):
+                    known_date = datetime.fromisoformat(row["published_at"])  # daha önce çekilip tarihi öğrenilmiş
+                if self._too_old(known_date, days):
+                    source_stats.too_old += 1
+                    if link.id in pending_ids:
+                        self.seen.remove_pending(link.id)
+                    continue
                 if link.id not in pending_ids and self.seen.seen_recently(
                     link.id, published_at=feed_stamp, within_hours=self._skip_window_hours(link)
                 ):
@@ -297,7 +306,7 @@ class ScrapeRunner:
                 source_attempts += 1
                 if link.id in pending_ids:
                     stats.retried += 1
-                outcome = self._process_link(source, link, source_stats, feed_stamp)
+                outcome = self._process_link(source, link, source_stats, feed_stamp, days=days)
                 if outcome == "error":
                     self._remember_failure(source.name, link, "çekme hatası")
                 else:
@@ -357,8 +366,17 @@ class ScrapeRunner:
             return self.seen.recent_hours
         return min(self.seen.recent_hours, RECHECK_HOURS_WITHOUT_UPDATE_STAMP)
 
+    def _too_old(self, published: datetime | None, backfill_days: int = 0) -> bool:
+        """Haber ``MAX_ARTICLE_AGE_DAYS``'ten (geriye dönük taramada ``backfill_days``'ten) eski mi? Tarih yoksa hayır."""
+        limit = int(self.settings.max_article_age_days)
+        if limit <= 0 or published is None:
+            return False
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=UTC)
+        return published < utcnow() - timedelta(days=max(limit, int(backfill_days)))
+
     def _process_link(
-        self, source: Source, link: DiscoveredLink, source_stats: SourceStats, feed_stamp: datetime | None
+        self, source: Source, link: DiscoveredLink, source_stats: SourceStats, feed_stamp: datetime | None, *, days: int = 0
     ) -> str:
         """Bağlantıyı çeker ve yayınlar; sonuç: "published" | "unchanged" | "skipped" | "error"."""
         try:
@@ -375,6 +393,11 @@ class ScrapeRunner:
             source_stats.skipped += 1
             return "skipped"
         source_stats.fetched += 1
+        if self._too_old(record.published_at, days):
+            # Beslemede tarih yoktu ya da yanlıştı; sayfadaki tarih eski. Tekrar çekilmesin diye görüldü sayılır.
+            source_stats.too_old += 1
+            self.seen.mark(record, published_at=feed_stamp)
+            return "skipped"
         status = self.seen.status(record.id, record.content_hash)
         if status == "unchanged":
             source_stats.unchanged += 1

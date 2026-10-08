@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     state_db_path: str = "data/state.sqlite3"
     backfill_days: int = 0  # >0 ise 12punto arşiv aramasıyla geriye dönük tarama yapılır
     max_articles_per_run: int = 400
+    # Bundan eski haberler çekilmez/yayınlanmaz (0 = sınırsız). Hürriyet RSS'i yıllar önceki haberleri de
+    # içerebiliyor; 12punto'nun az güncellenen bölümleri de haftalar önceki haberleri listeliyor.
+    max_article_age_days: int = 7
     hurriyet_gundem_rss: str = "https://www.hurriyet.com.tr/rss/gundem"
     hurriyet_gundem_listing: str = "https://www.hurriyet.com.tr/gundem/"
     punto_base_url: str = "https://12punto.com.tr"

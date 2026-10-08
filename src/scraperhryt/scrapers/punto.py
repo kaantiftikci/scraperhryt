@@ -57,7 +57,9 @@ log = logging.getLogger(__name__)
 ARTICLE_PATH_RE = re.compile(r"^/[a-z0-9-]+/[a-z0-9-]+-\d{3,}$")
 _NO_RESULTS_RE = re.compile(r"sonuç bulunamadı")
 _PAGE_PARAM_RE = re.compile(r"[?&]sayfa=(\d+)")
-ARCHIVE_RESULTS_SELECTOR = "section.category"
+# 2026 yeniden tasarımı: sonuçlar section.punto-listing, sayfalama nav.punto-pagination; eski düzen de desteklenir.
+ARCHIVE_RESULTS_SELECTOR = "section.punto-listing, section.category"
+ARCHIVE_PAGINATION_SELECTOR = "nav.punto-pagination a[href], div.pagination a[href]"
 ARCHIVE_MAX_PAGES = 50  # gün başına güvenlik tavanı (20 sonuç/sayfa → 1000 haber)
 _PUBLISHED_RE = re.compile(r"yayınlanma\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
 _UPDATED_RE = re.compile(r"güncelle(?:n)?me\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)")
@@ -71,6 +73,8 @@ _DROP_PARAGRAPH_PATTERNS = tuple(
     )
 )
 _DROP_SELECTORS = (
+    ".punto-article-body__source",  # "Haber Kaynağı : 12punto"
+    ".punto-ad",
     "img",
     "script",
     "style",
@@ -305,8 +309,8 @@ class PuntoSource:
         return self._links_from_anchors(html, category_hint=category_hint, origin="listing")
 
     def parse_search_page(self, html: str) -> ArchivePage:
-        """Arşiv arama sayfasını çözer: yalnızca ``section.category`` sonuç kapsayıcısındaki haber bağlantıları
-        (kenar çubuğu/menü bağlantıları hariç) ve ``div.pagination``'dan okunan toplam sayfa sayısı.
+        """Arşiv arama sayfasını çözer: yalnızca sonuç kapsayıcısındaki haber bağlantıları (kenar çubuğu/menü
+        bağlantıları hariç) ve sayfalama bağlantılarından okunan toplam sayfa sayısı.
 
         Kapsayıcı yoksa ya da çözülmüş metni "Sonuç bulunamadı" içeriyorsa (sayfa ``ç``'yi ``&#231;`` olarak
         kodlar; bu yüzden ham HTML değil metin denetlenir) boş sonuç döner.
@@ -320,7 +324,7 @@ class PuntoSource:
             return ArchivePage()
         links = self._links_from_anchors(container, category_hint="", origin="archive")
         page_count = 1
-        for anchor in container.select("div.pagination a[href]"):
+        for anchor in soup.select(ARCHIVE_PAGINATION_SELECTOR):
             match = _PAGE_PARAM_RE.search(str(anchor.get("href") or ""))
             if match:
                 page_count = max(page_count, int(match.group(1)))
@@ -364,6 +368,12 @@ class PuntoSource:
             or parse_tr_date(meta.get("datemodified"))
         )
         content = self._choose_content(self._content_from_html(soup), paragraphize_flat_text(ld.get("articleBody")))
+        if not content and title and subtitle:
+            # Galeri/video sayfalarında gövde metni yok; açıklama haberin tek metnidir (anahtar kelime de orada olabilir).
+            log.info("12punto haberinde gövde yok, açıklama içerik olarak kullanılıyor: %s", link.url)
+            content = subtitle
+        elif subtitle and content.startswith(subtitle) and len(content) > len(subtitle) + 50:
+            content = content[len(subtitle) :].lstrip()  # gövde spotu tekrar ediyorsa ikinci kopyayı at
         if not title or not content:
             log.warning("12punto haberi eksik (başlık=%s, içerik=%d karakter): %s", bool(title), len(content), link.url)
             return None
@@ -390,7 +400,8 @@ class PuntoSource:
 
     @staticmethod
     def _content_from_html(soup) -> str:
-        body = soup.select_one("section.details")
+        # 2026 yeniden tasarımı: div.punto-article-body__content; eski düzen: section.details
+        body = soup.select_one("div.punto-article-body__content") or soup.select_one("section.details")
         if body is None:
             return ""
         paragraphs = extract_paragraphs(body, drop_selectors=_DROP_SELECTORS, drop_patterns=_DROP_PARAGRAPH_PATTERNS)

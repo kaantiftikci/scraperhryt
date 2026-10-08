@@ -57,6 +57,9 @@ _BOILERPLATE_PHRASES = tuple(
         r"haberlerimizi google['’`]?da takip edin\.?",
         r"gelişmelerden anında haberdar olun\.?",
         r"google['’`]?da tercih edilen\s+kaynak olarak ekleyin\.?",
+        # sayfa sonundaki e-bülten kutusu
+        r"haber bültenleri ve e-posta tercihleri",
+        r"türkiye ve dünyadaki en güncel gelişmelerden haberdar olmak için,?\s*bültenlerin gönderileceği\s+e-posta adresini girin\.?",
     )
 )
 _DROP_PARAGRAPH_PATTERNS = _BOILERPLATE_PHRASES + tuple(
@@ -65,6 +68,7 @@ _DROP_PARAGRAPH_PATTERNS = _BOILERPLATE_PHRASES + tuple(
         r"^haberin devamı$",
         r"^haberle ilgili daha fazlası",
         r"^bakmadan geçme!?$",
+        r"^ayrıntılar geliyor\.*$",  # son dakika yer tutucusu
     )
 )
 _DROP_SELECTORS = (

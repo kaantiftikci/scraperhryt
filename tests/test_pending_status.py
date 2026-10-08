@@ -142,3 +142,94 @@ def test_ask_ui_shows_elapsed_time_and_aborts_after_server_limits() -> None:
     page = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
     assert "const ASK_LIMIT_MS = 170000;" in page  # 20 + 90 + 60 sn pay
     assert "signal: ctrl.signal" in page and "Yanıt hazırlanıyor…" in page and "AbortError" in page
+
+
+def test_runner_skips_articles_older_than_max_age(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    fetched: list[str] = []
+
+    class AgedSource:
+        name = "hurriyet"
+
+        def discover(self, client, *, backfill_days=0, limit=None):
+            return [
+                DiscoveredLink(url="https://www.hurriyet.com.tr/gundem/eski-rss-1", title_hint="eski", published_hint=now - timedelta(days=30)),
+                DiscoveredLink(url="https://www.hurriyet.com.tr/gundem/tarihsiz-2", title_hint="tarihsiz"),
+                DiscoveredLink(url="https://www.hurriyet.com.tr/gundem/yeni-3", title_hint="yeni", published_hint=now - timedelta(hours=2)),
+            ]
+
+        def fetch_article(self, client, link):
+            fetched.append(link.title_hint)
+            published = now - timedelta(days=40) if link.title_hint == "tarihsiz" else now - timedelta(hours=2)
+            return NewsRecord.new(source="hurriyet", content_url=link.url, title=link.title_hint, content="Bakan açıkladı", published_at=published)
+
+    runner, broker, _seen = _runner(tmp_path, AgedSource(), max_article_age_days=7)
+    stats = runner.run_once()
+    assert fetched == ["tarihsiz", "yeni"]  # beslemede tarihi eski olan hiç çekilmez
+    assert stats.published == 1 and stats.source("hurriyet").too_old == 2 and "eski=2" in stats.summary()
+    assert broker.size(Queue.ARTICLES_RAW) == 1
+    # sonraki turda tarihi öğrenilmiş eski haber yeniden çekilmez
+    fetched.clear()
+    runner.run_once()
+    assert "tarihsiz" not in fetched
+    # geriye dönük taramada pencere BACKFILL_DAYS kadar genişler
+    runner2, broker2, _ = _runner(tmp_path / "b", AgedSource(), max_article_age_days=7)
+    assert runner2.run_once(backfill_days=45).published == 3 and broker2.size(Queue.ARTICLES_RAW) == 3
+
+
+def test_hurriyet_newsletter_box_is_not_article_text() -> None:
+    from bs4 import BeautifulSoup
+
+    from scraperhryt.scrapers.hurriyet import HurriyetSource
+
+    html = (
+        '<div class="news-content"><p>Bakan yeni düzenlemeyi açıkladı.</p><p>Ayrıntılar Geliyor...</p>'
+        "<p>Haber Bültenleri ve E-Posta Tercihleri</p><p>Türkiye ve dünyadaki en güncel gelişmelerden haberdar olmak "
+        "için, bültenlerin gönderileceği e-posta adresini girin.</p></div>"
+    )
+    assert HurriyetSource._content_from_html(BeautifulSoup(html, "lxml")) == "Bakan yeni düzenlemeyi açıkladı."
+    flat = "Bakan açıkladı. Haber Bültenleri ve E-Posta Tercihleri Türkiye ve dünyadaki en güncel gelişmelerden haberdar olmak için, bültenlerin gönderileceği e-posta adresini girin."
+    assert "Bülten" not in HurriyetSource.clean_article_body(flat)
+
+
+def test_punto_gallery_page_uses_description_as_content() -> None:
+    from scraperhryt.scrapers.punto import PuntoSource
+
+    html = (
+        "<html><head><meta name='description' content='Mustafa Sandal\'ın eşinin fondan kazandığı para gündem oldu.'>"
+        "</head><body><h1>Fondan kazandığı para dudak uçuklattı</h1></body></html>"
+    )
+    rec = PuntoSource(Settings(_env_file=None)).parse_article(html, url="https://12punto.com.tr/yasam/galeri-fon-haberi-154290")
+    assert rec is not None and rec.content.startswith("Mustafa Sandal") and rec.title.startswith("Fondan")
+
+
+def test_punto_2026_redesign_archive_and_article_markup() -> None:
+    from datetime import date
+
+    from scraperhryt.scrapers.punto import PuntoSource
+
+    src = PuntoSource(Settings(_env_file=None))
+    archive = (
+        '<section class="punto-listing"><div class="punto-listing__grid">'
+        '<a class="punto-listing__card" title="Ukrayna’da başbakan değişikliği" data-yayintarihi2="12.07.2026 00:00:00" '
+        'href="/dunya/ukraynada-basbakan-degisikligi-gundemde-144293"><p class="punto-listing__title">x</p></a>'
+        '<a class="punto-listing__card" title="Haluk Levent" data-yayintarihi2="12.07.2026 00:00:00" '
+        'href="/gundem/haluk-levent-gozalti-144292"></a></div>'
+        '<nav class="punto-pagination"><a href="/Arama/Ara?key=&amp;StartDate=12%2f07%2f2026&amp;sayfa=1">1</a>'
+        '<a href="/Arama/Ara?key=&amp;StartDate=12%2f07%2f2026&amp;sayfa=4">4</a></nav></section>'
+        '<section class="punto-sidebar"><a href="/spor/kenar-cubugu-haberi-144000">yan</a></section>'
+    )
+    page = src.parse_search_page(archive)
+    assert page.page_count == 4 and len(page.links) == 2
+    assert all(link.published_hint.date() == date(2026, 7, 12) for link in page.links)
+
+    article = (
+        "<html><body><section class='punto-article-header'><h1 class='punto-article-header__title'>Başlık</h1>"
+        "<p class='punto-article-header__spot'>Spot metni.</p></section>"
+        "<section class='punto-article-body'><div class='punto-article-body__content'><p>Birinci paragraf yeterince uzun bir metin.</p>"
+        "<p>İkinci paragraf.</p><p class='punto-article-body__source'>Haber Kaynağı : <a>12punto</a></p></div></section></body></html>"
+    )
+    rec = src.parse_article(article, url="https://12punto.com.tr/gundem/baslik-154871")
+    assert rec is not None and rec.content == "Birinci paragraf yeterince uzun bir metin.\n\nİkinci paragraf."
