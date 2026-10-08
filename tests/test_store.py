@@ -477,11 +477,11 @@ def test_es_ensure_indices_creates_each_index_once() -> None:
     store, stub = _es_store()
     store.ensure_indices()
     created = [kw["index"] for kw in stub.of("create")]
-    assert created == ["news-articles", "news-alarms", "news-reports", "news-feedback"]
+    assert created == ["news-articles", "news-alarms", "news-reports"]
     assert "tr_text" in stub.of("create")[0]["settings"]["analysis"]["analyzer"]
     assert stub.of("create")[0]["mappings"]["properties"]["embedding"]["dims"] == 3
     store.ensure_indices()
-    assert len(stub.of("create")) == 4
+    assert len(stub.of("create")) == 3
 
 
 def test_es_writes_use_ids_and_convert_connection_errors_to_retry() -> None:
@@ -562,7 +562,7 @@ def test_es_ensure_indices_adds_missing_embedding_mapping_to_existing_index() ->
     stub.indices.existing.update({"news-articles", "news-alarms", "news-reports"})
     stub.indices.mappings["news-articles"] = {"title": {"type": "text"}}
     store.ensure_indices()
-    assert [kw["index"] for kw in stub.of("create")] == ["news-feedback"]  # yalnızca yeni geri bildirim indeksi
+    assert stub.of("create") == []  # indeksler zaten var
     assert stub.of("get_mapping") == [{"index": "news-articles"}]
     put = stub.of("put_mapping")
     assert len(put) == 1 and put[0]["index"] == "news-articles"
@@ -617,7 +617,7 @@ def test_es_ensure_indices_skips_mapping_reconciliation_without_embedding_model(
     # yeni oluşturulan indeksin eşlemesi zaten ayarlardan gelir: uzlaştırma gerekmez
     fresh, stub_fresh = _es_store()
     fresh.ensure_indices()
-    assert len(stub_fresh.of("create")) == 4 and stub_fresh.of("get_mapping") == []
+    assert len(stub_fresh.of("create")) == 3 and stub_fresh.of("get_mapping") == []
 
 
 def test_es_index_record_retries_without_vector_when_mapping_rejects_it(caplog: pytest.LogCaptureFixture) -> None:

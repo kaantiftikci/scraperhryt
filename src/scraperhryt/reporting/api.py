@@ -16,7 +16,6 @@ başarısızsa raporu yine ``published=false`` ile döndürür (``ReportPublishe
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -36,7 +35,7 @@ from pydantic import BaseModel, Field
 from .. import __version__
 from ..broker import Broker, Retry, RoutingKey
 from ..config import Settings
-from ..models import Answer, Feedback, Report, utcnow
+from ..models import Answer, Report, utcnow
 from ..pipeline.llm import LLM, LLMBadOutput, LLMUnavailable
 from ..store import ArticleStore, SearchHit
 from ..textutil import excerpt
@@ -125,17 +124,6 @@ class AskRequest(BaseModel):
     since_days: int | None = Field(default=None, ge=1, le=MAX_SINCE_DAYS, description="Varsayılan RAG_RECENCY_DAYS")
     top_k: int | None = Field(default=None, ge=1, le=50, description="Varsayılan RAG_TOP_K")
     sources: list[str] | None = Field(default=None, description="Kaynak filtresi, örn. ['hurriyet']")
-
-
-class FeedbackRequest(BaseModel):
-    label: Literal["true_positive", "false_positive", "needs_context"]
-    note: str = Field(default="", max_length=2000)
-    user: str = Field(default="", max_length=120)
-
-
-class FeedbackResponse(BaseModel):
-    count: int
-    items: list[dict[str, Any]]
 
 
 class GenerateReportRequest(BaseModel):
@@ -461,41 +449,6 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
             if len(items) >= size:
                 break
         return AlarmsResponse(count=len(items), items=items)
-
-    # --- geri bildirim ---
-    @app.post("/alarms/{alarm_id}/feedback", summary="Alarm için insan geri bildirimi (doğru/yanlış pozitif)")
-    def alarm_feedback(alarm_id: str, payload: FeedbackRequest) -> dict[str, Any]:
-        alarm = guarded("alarm sorgusu", lambda: store.get_alarm(alarm_id))
-        if alarm is None:
-            raise HTTPException(status_code=404, detail=f"Alarm bulunamadı: {alarm_id}")
-        stamp = utcnow()
-        feedback = Feedback(
-            feedback_id=hashlib.sha1(f"{alarm_id}:{payload.label}:{stamp.isoformat()}".encode()).hexdigest()[:20],
-            alarm_id=alarm_id,
-            record_id=str(alarm.get("record_id", "")),
-            label=payload.label,
-            note=payload.note.strip(),
-            user=payload.user.strip(),
-            channel="api",
-            created_at=stamp,
-        )
-        guarded("geri bildirim kaydı", lambda: store.index_feedback(feedback, refresh=True))
-        return feedback.model_dump(mode="json")
-
-    @app.get("/feedback", response_model=FeedbackResponse, summary="Geri bildirim listesi")
-    def list_feedback(
-        alarm_id: Annotated[str | None, Query()] = None,
-        since_days: Annotated[int | None, Query(ge=1, le=365)] = None,
-        size: Annotated[int, Query(ge=1, le=500)] = 100,
-    ) -> FeedbackResponse:
-        since = utcnow() - timedelta(days=since_days) if since_days else None
-        items = guarded("geri bildirim listesi", lambda: store.list_feedback(since=since, alarm_id=alarm_id, size=size))
-        return FeedbackResponse(count=len(items), items=items)
-
-    @app.get("/feedback/stats", summary="Geri bildirim özeti ve kesinlik tahmini")
-    def feedback_stats(since_days: Annotated[int | None, Query(ge=1, le=365)] = None) -> dict[str, Any]:
-        since = utcnow() - timedelta(days=since_days) if since_days else None
-        return guarded("geri bildirim istatistiği", lambda: store.feedback_stats(since=since))
 
     # --- raporlar ---
     @app.get("/reports", response_model=ReportsResponse, summary="Son raporlar (news-reports)")

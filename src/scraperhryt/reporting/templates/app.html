@@ -102,10 +102,6 @@
     .chip.kw { color: var(--accent); border-color: var(--accent); }
     .chip.review { color: var(--important); border-color: var(--important); }
     mark { background: var(--mark); color: inherit; padding: 0 2px; border-radius: 3px; }
-    .fb { display: flex; gap: 6px; flex-wrap: wrap; }
-    .fb button { padding: 4px 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; cursor: pointer; font: 500 13px var(--font-body); }
-    .fb button:hover { border-color: var(--accent); }
-    .fb button:disabled { opacity: .7; cursor: default; }
 
     /* soru cevabı ve raporlar: tam genişlik */
     .block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
@@ -201,10 +197,6 @@
         <div class="foot">
           {% for k in a.matched_keywords[:3] %}<span class="chip kw">{{ k }}</span>{% endfor %}{% if a.needs_review %}<span class="chip review">inceleme</span>{% endif %}
         </div>
-        {% if a.alarm_id %}<div class="fb" role="group" aria-label="Bu alarm doğru mu?">
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="true_positive">Doğru</button>
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="false_positive">Yanlış</button>
-          <button type="button" data-id="{{ a.alarm_id }}" data-label="needs_context">Belirsiz</button></div>{% endif %}
       </article>
       {% else %}<p class="empty">Henüz alarm yok. Haberler skorlandıkça burada görünecek.</p>{% endfor %}
     </div>
@@ -389,22 +381,7 @@
   }
   $("ask-form").addEventListener("submit", ask);
 
-  /* alarmlar + geri bildirim */
-  async function feedback(btn) {
-    const group = btn.parentElement.querySelectorAll("button");
-    group.forEach((b) => { b.disabled = true; });
-    try {
-      const r = await fetch(`/alarms/${encodeURIComponent(btn.dataset.id)}/feedback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: btn.dataset.label, user: "arayüz" }) });
-      if (!r.ok) throw new Error();
-      btn.textContent = "Kaydedildi";
-    } catch (e) {
-      btn.textContent = "Kaydedilemedi";
-      group.forEach((b) => { b.disabled = false; });
-    }
-  }
-  function bindFeedback() {
-    $("alarms").querySelectorAll(".fb button").forEach((b) => b.addEventListener("click", () => feedback(b)));
-  }
+  /* alarmlar */
   function renderAlarm(a) {
     const score = Number(a.alarm_score || 0);
     return `<article class="card alarm">
@@ -412,10 +389,6 @@
       <h3><a href="${safeUrl(a.content_url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
       ${a.alarm_reason ? `<div class="reason"><p>${esc(a.alarm_reason)}</p></div>` : ""}
       <div class="foot">${chips(a.matched_keywords)}${a.needs_review ? `<span class="chip review">inceleme</span>` : ""}${a.duplicate_of ? `<span class="chip">tekrar</span>` : ""}</div>
-      ${a.alarm_id ? `<div class="fb" role="group" aria-label="Bu alarm doğru mu?">
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="true_positive">Doğru</button>
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="false_positive">Yanlış</button>
-        <button type="button" data-id="${esc(a.alarm_id)}" data-label="needs_context">Belirsiz</button></div>` : ""}
     </article>`;
   }
   async function loadAlarms(ev) {
@@ -428,11 +401,9 @@
       const data = await r.json();
       $("alarm-note").textContent = `${data.count} alarm`;
       $("alarms").innerHTML = data.items.length ? data.items.map(renderAlarm).join("") : `<p class="empty">Bu aralıkta alarm yok.</p>`;
-      bindFeedback();
     } catch (e) { $("alarm-note").textContent = "Alarmlar yüklenemedi: " + e.message; }
   }
   $("alarm-form").addEventListener("submit", loadAlarms);
-  bindFeedback();
 
   loadStatus();
   search();

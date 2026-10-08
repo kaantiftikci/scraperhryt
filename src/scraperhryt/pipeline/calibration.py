@@ -1,4 +1,4 @@
-"""Kalibrasyon: etiketli altın set (ve isteğe bağlı insan geri bildirimi) üzerinde LLM skorlarını ölçer.
+"""Kalibrasyon: etiketli altın set üzerinde LLM skorlarını ölçer.
 
 Her eşik için kesinlik/duyarlılık/F1 hesaplanır ve en iyi F1'i veren eşik önerilir. ``scraperhryt calibrate``.
 Altın set satırı (JSONL): {"title","subtitle","content","matched_keywords":[..],"source","label_is_alarm":bool,
@@ -29,7 +29,7 @@ class CalibrationItem:
     source: str = "golden"
     label_score: int | None = None
     note: str = ""
-    origin: str = "golden"  # "golden" | "feedback"
+    origin: str = "golden"
 
     def to_record(self, index: int) -> NewsRecord:
         record = NewsRecord.new(
@@ -114,35 +114,6 @@ def load_golden_set(path: str | Path) -> list[CalibrationItem]:
             )
         except (ValueError, KeyError, TypeError) as exc:
             log.warning("Altın set satırı %d atlandı: %s", lineno, exc)
-    return items
-
-
-def feedback_items(feedback_docs: Iterable[dict[str, Any]], store: Any) -> list[CalibrationItem]:
-    """İnsan geri bildirimlerini (true/false positive) kalibrasyon örneklerine çevirir; needs_context atlanır."""
-    items: list[CalibrationItem] = []
-    for fb in feedback_docs:
-        label = fb.get("label")
-        if label not in ("true_positive", "false_positive"):
-            continue
-        doc = store.get_record(str(fb.get("record_id", ""))) if fb.get("record_id") else None
-        if not doc:
-            alarm = store.get_alarm(str(fb.get("alarm_id", "")))
-            doc = store.get_record(str(alarm.get("record_id", ""))) if alarm else None
-        if not doc:
-            continue
-        items.append(
-            CalibrationItem(
-                title=str(doc.get("title", "")),
-                subtitle=str(doc.get("subtitle", "")),
-                content=str(doc.get("content", "")),
-                matched_keywords=[str(k) for k in doc.get("matched_keywords", [])],
-                source=str(doc.get("source", "")),
-                label_is_alarm=label == "true_positive",
-                label_score=None,
-                note=str(fb.get("note", "")),
-                origin="feedback",
-            )
-        )
     return items
 
 

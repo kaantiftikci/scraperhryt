@@ -1,4 +1,4 @@
-"""Doğruluk geliştirmeleri: eşik kuralları, çoklu örnekleme, eş anlamlılar, olay kümeleme, geri bildirim, kalibrasyon,
+"""Doğruluk geliştirmeleri: eşik kuralları, çoklu örnekleme, eş anlamlılar, olay kümeleme, kalibrasyon,
 yeniden skorlama, zaman çizelgesi ve ölü mektup geri oynatma."""
 
 from __future__ import annotations
@@ -8,12 +8,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 
 from scraperhryt.broker import InMemoryBroker, Queue, RoutingKey
 from scraperhryt.config import Settings
-from scraperhryt.models import AlarmEvent, Feedback, LLMVerdict, NewsRecord, Stage, utcnow
+from scraperhryt.models import AlarmEvent, LLMVerdict, NewsRecord, Stage, utcnow
 from scraperhryt.pipeline.alarm import AlarmService
 from scraperhryt.pipeline.calibration import format_calibration_report, load_golden_set, run_calibration
 from scraperhryt.pipeline.dedup import EventClusterer, title_jaccard
@@ -159,8 +158,8 @@ def _scored(rec: NewsRecord):
     return Message(body=rec.to_message(), routing_key=RoutingKey.ARTICLE_SCORED)
 
 
-# ---- geri bildirim + API ----
-def test_feedback_endpoints_and_stats() -> None:
+# ---- alarm listesi API ----
+def test_alarm_list_hides_duplicates() -> None:
     s = settings()
     store = InMemoryStore()
     rec = _alarm("Fon soruşturması")
@@ -169,13 +168,6 @@ def test_feedback_endpoints_and_stats() -> None:
     store.index_record(rec)
     store.index_alarm(event)
     client = TestClient(create_app(s, store, FakeOllama()))
-    r = client.post(f"/alarms/{event.alarm_id}/feedback", json={"label": "false_positive", "note": "fiil"})
-    assert r.status_code == 200 and r.json()["record_id"] == rec.id
-    assert client.post("/alarms/yok/feedback", json={"label": "true_positive"}).status_code == 404
-    assert client.post(f"/alarms/{event.alarm_id}/feedback", json={"label": "true_positive"}).status_code == 200
-    stats = client.get("/feedback/stats").json()
-    assert stats["total"] == 2 and stats["precision_estimate"] == 0.5
-    assert client.get("/feedback", params={"alarm_id": event.alarm_id}).json()["count"] == 2
     listed = client.get("/alarms", params={"include_duplicates": False}).json()
     assert listed["count"] == 1
 
@@ -234,18 +226,6 @@ def test_origin_queue_inference() -> None:
     assert origin_queue({"x-origin-queue": "q.articles.keyword"}) == "q.articles.keyword"
     assert origin_queue({"x-death": [{"queue": b"q.articles.scored.retry", "reason": "expired"}]}) == "q.articles.scored"
     assert origin_queue({}, "q.alarms") == "q.alarms" and origin_queue({}) is None
-
-
-def test_feedback_model_roundtrip_in_store() -> None:
-    store = InMemoryStore()
-    fb = Feedback(feedback_id="f1", alarm_id="a1", label="true_positive")
-    store.index_feedback(fb)
-    assert store.list_feedback(alarm_id="a1")[0]["label"] == "true_positive"
-    assert store.feedback_stats()["precision_estimate"] == 1.0
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        Feedback(feedback_id="f2", alarm_id="a1", label="true_positive", created_at="bozuk")  # type: ignore[arg-type]
 
 
 # ---- ön sınıflandırıcı ----

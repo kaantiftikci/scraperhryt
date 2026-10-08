@@ -287,24 +287,6 @@ class Report(BaseModel):
         return doc
 
 
-class Feedback(BaseModel):
-    """Bir alarm için insan geri bildirimi (news-feedback indeksi); kalibrasyon ve raporlarda kullanılır."""
-
-    feedback_id: str
-    alarm_id: str
-    record_id: str = ""
-    label: str  # "true_positive" | "false_positive" | "needs_context"
-    note: str = ""
-    user: str = ""
-    channel: str = "api"  # "api" | "cli" | "dashboard"
-    created_at: datetime = Field(default_factory=utcnow)
-
-    def to_es_document(self) -> dict[str, Any]:
-        doc = self.model_dump(mode="json")
-        doc["@timestamp"] = self.created_at.isoformat()
-        return doc
-
-
 class TimelineItem(BaseModel):
     """RAG cevabındaki zaman çizelgesi adımı."""
 

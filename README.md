@@ -576,13 +576,12 @@ yalnızca `.env`'e yazın (`.env` git'e girmez).
 | Kaynak/kategori bazlı eşik | `ALARM_THRESHOLDS_JSON={"source:12punto":70,"category:spor":90,"keyword:fon":50}` | Öncelik: kategori > anahtar kelime > kaynak > `ALARM_THRESHOLD`; uygulanan eşik `alarm_threshold_used` alanında |
 | Öz-tutarlılık (çoklu örnekleme) | `LLM_SAMPLES=3`, `LLM_SAMPLE_TEMPERATURE`, `LLM_DISAGREEMENT_THRESHOLD` | Aynı haber N kez puanlanır, medyan alınır; örnekler arası fark eşiği aşarsa `needs_review=true`, `confidence` düşer |
 | Olay kümeleme / tekrar bastırma | `ALARM_DEDUP_*`, `ALARM_NOTIFY_DUPLICATES` | Pencere içindeki benzer alarm (embedding kosinüsü veya başlık Jaccard) aynı `event_id` altında toplanır; tekrar alarm depolanır ve `q.alarms`'a gider ama bildirim kanallarına gitmez (`x-duplicate` başlığı) |
-| Geri bildirim döngüsü | `POST /alarms/{id}/feedback`, `GET /feedback/stats`, `scraperhryt feedback ID --label ...` | Doğru/yanlış pozitif etiketleri `news-feedback` indeksinde; kesinlik tahmini ve kalibrasyon girdisi |
-| Kalibrasyon | `scraperhryt calibrate [--from-feedback] [--fake-llm]`, `GOLDEN_SET_PATH=config/golden_set.jsonl` | Altın set üzerinde her eşik için kesinlik/duyarlılık/F1, önerilen `ALARM_THRESHOLD` |
+| Kalibrasyon | `scraperhryt calibrate [--fake-llm]`, `GOLDEN_SET_PATH=config/golden_set.jsonl` | Altın set üzerinde her eşik için kesinlik/duyarlılık/F1, önerilen `ALARM_THRESHOLD` |
 | Yeniden skorlama | `scraperhryt rescore --since-days 7 [--all] [--limit N] [--dry-run]` | Model/prompt/eşik değişince depodaki kayıtlar `q.articles.keyword`'e geri yazılır, olağan yoldan yeniden değerlendirilir |
 | Zaman çizelgesi | `scraperhryt ask`, `POST /ask` → `timeline` | RAG cevabında kaynaklar kronolojik (eski → yeni) listelenir |
 | Ölü mektup geri oynatma | `scraperhryt replay-dead-letters [--dry-run] [--limit N] [--to KUYRUK]` | `q.dead_letter` mesajları köken kuyruğuna (`x-origin-queue` / `x-death`) geri yazılır |
 
-Önerilen üretim profili: `OLLAMA_MODEL=qwen2.5:7b` (veya daha büyük), `LLM_SAMPLES=3`, `OLLAMA_EMBEDDING_MODEL=nomic-embed-text`, `ALARM_DEDUP_ENABLED=true`, düzenli `scraperhryt calibrate --from-feedback` ile eşik gözden geçirme.
+Önerilen üretim profili: `OLLAMA_MODEL=qwen2.5:7b` (veya daha büyük), `LLM_SAMPLES=3`, `OLLAMA_EMBEDDING_MODEL=nomic-embed-text`, `ALARM_DEDUP_ENABLED=true`, düzenli `scraperhryt calibrate` ile eşik gözden geçirme.
 
 ## Soru-cevap: tam metin özet ve sayı doğrulama
 
@@ -596,7 +595,7 @@ yalnızca `.env`'e yazın (`.env` git'e girmez).
 Tek sayfa: `http://localhost:8000/` (Docker'da `API_PORT` ile değiştirilebilir; eski `/ara` adresi buraya yönlenir).
 
 - **Durum şeridi:** son tarama, sonraki taramaya kalan süre, çekilemeyen (bekleyen) haberler ve uyarılar. Tarama sürerken canlı ilerleme çubuğu kaynağı, aşamayı ve yüzdeyi gösterir; turlar arasında çubuk sonraki taramaya kalan süreyi doldurur.
-- **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar (Doğru / Yanlış / Belirsiz geri bildirimi), Raporlar.
+- **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar, Raporlar.
 - Haberler ve alarmlar kare kartlarda gösterilir: geniş ekranda satırda üç, tablette iki, telefonda bir kart. Açık ve koyu tema desteklenir; ikon ve emoji kullanılmaz.
 - Sayısal özetler arayüzde değil API'de: `GET /stats?hours=24` (kaynak, anahtar kelime, kategori ve saatlik dağılım).
 

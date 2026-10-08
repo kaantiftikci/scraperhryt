@@ -934,10 +934,9 @@ def cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_calibrate(args: argparse.Namespace, settings: Settings) -> int:
-    """Altın set (+ isteğe bağlı geri bildirim) üzerinde LLM skorlarını ölçer, eşik önerir."""
+    """Altın set üzerinde LLM skorlarını ölçer, eşik önerir."""
     from .broker import InMemoryBroker
     from .pipeline.calibration import (
-        feedback_items,
         format_calibration_report,
         load_golden_set,
         run_calibration,
@@ -949,14 +948,6 @@ def cmd_calibrate(args: argparse.Namespace, settings: Settings) -> int:
     except FileNotFoundError as exc:
         log.error("%s", exc)
         return 1
-    store = None
-    if args.from_feedback:
-        try:
-            store = prepare_store(settings, in_memory=False)
-            items += feedback_items(store.list_feedback(size=1000), store)
-        except Exception as exc:
-            log.error("Geri bildirimler okunamadı: %s", describe_exc(exc))
-            return 1
     if not items:
         log.error("Kalibrasyon için örnek yok")
         return 1
@@ -1056,37 +1047,6 @@ def cmd_replay(args: argparse.Namespace, settings: Settings) -> int:
     finally:
         broker.close()
     print(format_replay(stats))
-    return 0
-
-
-def cmd_feedback(args: argparse.Namespace, settings: Settings) -> int:
-    """Bir alarmı doğru/yanlış pozitif olarak etiketler (news-feedback)."""
-    import hashlib
-
-    from .models import Feedback, utcnow
-
-    try:
-        store = prepare_store(settings, in_memory=False)
-        alarm = store.get_alarm(args.alarm_id)
-        if alarm is None:
-            log.error("Alarm bulunamadı: %s", args.alarm_id)
-            return 1
-        stamp = utcnow()
-        fb = Feedback(
-            feedback_id=hashlib.sha1(f"{args.alarm_id}:{args.label}:{stamp.isoformat()}".encode()).hexdigest()[:20],
-            alarm_id=args.alarm_id,
-            record_id=str(alarm.get("record_id", "")),
-            label=args.label,
-            note=args.note or "",
-            user=args.user or "",
-            channel="cli",
-            created_at=stamp,
-        )
-        store.index_feedback(fb, refresh=True)
-    except Exception as exc:
-        log.error("Geri bildirim kaydedilemedi: %s", describe_exc(exc))
-        return 1
-    print(f"Geri bildirim kaydedildi: {fb.feedback_id} alarm={fb.alarm_id} etiket={fb.label}")
     return 0
 
 
@@ -1492,7 +1452,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("calibrate", help="altın set üzerinde LLM skorlarını ölç, eşik öner (config/golden_set.jsonl)")
     p.add_argument("--golden", help="altın set JSONL yolu (varsayılan GOLDEN_SET_PATH)")
-    p.add_argument("--from-feedback", action="store_true", help="Elasticsearch'teki insan geri bildirimlerini de örnek olarak ekle")
     p.add_argument("--fake-llm", action="store_true", help="Ollama yerine sezgisel değerlendirici")
     p.add_argument("--json", action="store_true", help="JSON çıktı")
     p.set_defaults(func=cmd_calibrate)
@@ -1514,13 +1473,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="listele, kuyruğa dokunma")
     p.add_argument("--to", help="köken bilinmiyorsa hedef kuyruk (ör. q.articles.keyword)")
     p.set_defaults(func=cmd_replay)
-
-    p = sub.add_parser("feedback", help="bir alarmı doğru/yanlış pozitif olarak etiketle")
-    p.add_argument("alarm_id")
-    p.add_argument("--label", required=True, choices=["true_positive", "false_positive", "needs_context"])
-    p.add_argument("--note", help="açıklama")
-    p.add_argument("--user", help="etiketleyen")
-    p.set_defaults(func=cmd_feedback)
 
     p = sub.add_parser("run-all", help="tüm katmanları tek süreçte çalıştır")
     p.add_argument(
