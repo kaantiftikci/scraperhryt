@@ -713,6 +713,16 @@ def cmd_setup(args: argparse.Namespace, settings: Settings) -> int:
         settings, required=not args.ollama_optional, timeout=args.timeout, max_wait=max(0.0, args.ollama_wait)
     )
     rows.append(("Ollama", ollama.label, ollama.detail))
+    if settings.reranker_url:
+        from .reporting.rerank import Reranker
+
+        reranker = Reranker(settings)
+        try:
+            ok = reranker.scores("bakan açıklaması", ["Bakan yeni düzenlemeyi açıkladı."]) is not None
+        finally:
+            reranker.close()
+        # Reranker isteğe bağlıdır: erişilemezse soru-cevap mevcut sıralamayla çalışır, kurulum başarısız sayılmaz.
+        rows.append(("Reranker", "OK" if ok else "UYARI", f"{settings.reranker_url} ({settings.reranker_api})"))
 
     print(render_table(("Bileşen", "Durum", "Ayrıntı"), rows))
     if not ollama.ok:
@@ -1016,6 +1026,46 @@ def cmd_reindex(args: argparse.Namespace, settings: Settings) -> int:
         f"rapor={done['reports']} geri bildirim={done['feedback']}"
     )
     return 0
+
+
+def cmd_embed_backfill(args: argparse.Namespace, settings: Settings) -> int:
+    """Kayıtlı haberlere (embedding açılmadan önce gelenler dahil) vektör üretip SQL'e ve arama indeksine yazar."""
+    from datetime import timedelta
+
+    from .models import NewsRecord
+    from .pipeline.llm import LLMError, OllamaClient
+
+    if not settings.ollama_embedding_model:
+        log.error("OLLAMA_EMBEDDING_MODEL boş: önce embedding modelini ayarlayın (ör. bge-m3)")
+        return 1
+    try:
+        store = prepare_store(settings, in_memory=False)
+    except Exception as exc:
+        log.error("Depo hazırlanamadı: %s", describe_exc(exc))
+        return 1
+    since = utcnow() - timedelta(days=args.since_days) if args.since_days else None
+    done = failed = 0
+    with OllamaClient(settings) as client:
+        for doc in store.iter_records(since=since):
+            if args.limit and done >= args.limit:
+                break
+            record = NewsRecord.model_validate(
+                {k: v for k, v in doc.items() if not k.startswith("@") and k not in ("content_length", "embedding")}
+            )
+            body = (record.content or "")[: settings.ollama_max_content_chars]
+            text = "\n".join(part for part in (record.title, record.subtitle, body) if part)
+            try:
+                vector = client.embed([text])[0]
+            except LLMError as exc:
+                failed += 1
+                log.warning("Vektör üretilemedi (%s): %s", record.id, exc)
+                continue
+            store.index_record(record, embedding=vector)
+            done += 1
+            if done % 50 == 0:
+                log.info("%d habere vektör yazıldı", done)
+    print(f"Embedding tamamlandı: {done} haber vektörlendi, {failed} hata (model={settings.ollama_embedding_model})")
+    return 0 if failed == 0 else 1
 
 
 def cmd_replay(args: argparse.Namespace, settings: Settings) -> int:
@@ -1487,6 +1537,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reindex", help="Elasticsearch arama indeksini SQL veritabanındaki kayıtlardan baştan kur")
     p.add_argument("--batch-size", type=int, default=500, help="SQL'den bir seferde okunacak satır (varsayılan 500)")
     p.set_defaults(func=cmd_reindex)
+
+    p = sub.add_parser("embed-backfill", help="kayıtlı haberlere embedding vektörü üret (anlamsal arama için)")
+    p.add_argument("--since-days", type=int, default=30, help="son N gün (0 = hepsi, varsayılan 30)")
+    p.add_argument("--limit", type=int, help="en çok N haber")
+    p.set_defaults(func=cmd_embed_backfill)
 
     p = sub.add_parser("replay-dead-letters", help="q.dead_letter mesajlarını köken kuyruklarına geri oynat")
     p.add_argument("--limit", type=int, help="en çok N mesaj")

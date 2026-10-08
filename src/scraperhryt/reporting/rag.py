@@ -43,6 +43,7 @@ from .prompts import (
     format_tr,
     parse_datetime,
 )
+from .rerank import Reranker, rerank_text
 
 log = logging.getLogger(__name__)
 
@@ -154,10 +155,16 @@ def doc_timestamp(doc: dict[str, Any]) -> datetime | None:
 class QAEngine:
     """Depo + LLM üzerinde RAG soru-cevap. ``FakeOllama`` ve ``HeuristicLLM`` ile de çalışır."""
 
-    def __init__(self, settings: Settings, store: ArticleStore, llm: LLM) -> None:
+    def __init__(
+        self, settings: Settings, store: ArticleStore, llm: LLM, *, reranker: Reranker | None | bool = True
+    ) -> None:
         self.settings = settings
         self.store = store
         self.llm = llm
+        # True: RERANKER_URL ayarlıysa kurulur; None/False: kapalı; ya da hazır bir Reranker nesnesi.
+        self.reranker: Reranker | None = (
+            Reranker.from_settings(settings) if reranker is True else (reranker or None)
+        )
         # HeuristicLLM serbest metin üretemez; sorgu yeniden yazma ve yanıt için deterministik yollar kullanılır.
         self._offline = isinstance(llm, HeuristicLLM)
 
@@ -186,12 +193,13 @@ class QAEngine:
         search_terms = _dedupe(terms + ground_entities(question, entities))[:MAX_SEARCH_TERMS]
         queries = self.search_queries(question, terms, entities)
         # Süzgeç sonrası top_k dolu kalsın diye iki katı aday getirilir (yeniden yazma terimleri gürültü ekleyebilir).
-        ranked = self.retrieve(question, queries, since=since, size=size * 2, sources=source_filter)
+        pool = max(size * 2, self.settings.rag_rerank_candidates) if self.reranker else size * 2
+        ranked = self.retrieve(question, queries, since=since, size=pool, sources=source_filter)
         promoted = promote_entities(question, [item.doc for item in ranked])
         if promoted:
             log.info("Cümle başındaki özel ad(lar) haberlerden tanındı: %s", promoted)
             entities = _dedupe(list(entities) + promoted)
-        relevant = filter_relevant(ranked, terms=terms, entities=entities, question=question)[:size]
+        relevant = self.rerank(question, filter_relevant(ranked, terms=terms, entities=entities, question=question), size)
         if len(relevant) < min(size, len(ranked)):
             log.info("İlgisiz belgeler elendi: %d adaydan %d ilgili haber kaldı", len(ranked), len(relevant))
         ordered = newest_first(relevant)
@@ -222,6 +230,21 @@ class QAEngine:
             search_terms=search_terms,
             timeline=build_timeline(citations),
         )
+
+    # --- 2b. yeniden sıralama ---
+    def rerank(self, question: str, docs: Sequence[RankedDoc], size: int) -> list[RankedDoc]:
+        """Reranker varsa adayları soruyla birlikte okutup en ilgili ``size`` haberi seçer; yoksa sırayı korur."""
+        if self.reranker is None or len(docs) <= 1:
+            return list(docs[:size])
+        candidates = list(docs[: self.settings.rag_rerank_candidates])
+        scores = self.reranker.scores(question, [rerank_text(item.doc) for item in candidates])
+        if scores is None:
+            return list(docs[:size])
+        order = sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)
+        log.info(
+            "Reranker %d adaydan %d haber seçti (en yüksek skor %.3f)", len(candidates), min(size, len(order)), scores[order[0]]
+        )
+        return [candidates[i] for i in order[:size]]
 
     # --- 1. sorgu yeniden yazma ---
     def rewrite_query(self, question: str) -> tuple[list[str], list[str]]:

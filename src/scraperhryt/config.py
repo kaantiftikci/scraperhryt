@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     # ---- Ollama / LLM ----
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b"
-    ollama_embedding_model: str = ""  # boş ise sadece BM25 arama kullanılır (ör: nomic-embed-text)
+    ollama_embedding_model: str = ""  # boş ise sadece BM25 arama kullanılır (ör: bge-m3)
+    # Embedding başka bir Ollama'da çalışıyorsa (ör. LLM uzak sunucuda, bge-m3 Mac mini'de); boşsa OLLAMA_BASE_URL
+    ollama_embedding_base_url: str = ""
     ollama_timeout: float = 180.0
     ollama_temperature: float = 0.1
     ollama_num_ctx: int = 8192
@@ -133,6 +135,15 @@ class Settings(BaseSettings):
     # Soru-cevap süre sınırları (sn). Ollama skorlayıcıyla paylaşıldığından istek kuyrukta bekleyebilir; sınır
     # aşılınca yeniden yazma yerine soru sözcükleri, model yanıtı yerine haber metninden çıkarımsal yanıt kullanılır.
     rag_rewrite_timeout: float = 20.0
+    # Reranker (çapraz kodlayıcı, ör. bge-reranker-v2-m3): bulunan adayları soruyla birlikte okuyup yeniden sıralar.
+    # RERANKER_URL boşsa kapalı. API: "llamacpp" (llama-server --reranking; Jina/Cohere uyumlu /v1/rerank) ya da
+    # "tei" (HuggingFace Text Embeddings Inference /rerank).
+    reranker_url: str = ""
+    reranker_api: str = "llamacpp"
+    reranker_model: str = "bge-reranker-v2-m3"
+    reranker_timeout: float = 15.0
+    reranker_max_chars: int = 1500  # aday başına reranker'a giden metin (başlık + alt başlık + içerik başı)
+    rag_rerank_candidates: int = 30  # reranker'a verilen en fazla aday
     rag_answer_timeout: float = 90.0
     rag_hybrid: bool = True  # embedding modeli ayarlıysa BM25 + kNN (RRF) birleşik arama
     rag_eval_path: str = "config/rag_eval.jsonl"

@@ -617,3 +617,32 @@ Tek sayfa: `http://localhost:8000/` (Docker'da `API_PORT` ile değiştirilebilir
 - **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar (Doğru / Yanlış / Belirsiz geri bildirimi), Raporlar.
 - Haberler ve alarmlar kare kartlarda gösterilir: geniş ekranda satırda üç, tablette iki, telefonda bir kart. Açık ve koyu tema desteklenir; ikon ve emoji kullanılmaz.
 - Sayısal özetler arayüzde değil API'de: `GET /stats?hours=24` (kaynak, anahtar kelime, kategori ve saatlik dağılım).
+
+## Anlamsal arama ve reranker (Mac mini)
+
+LLM uzak sunucuda çalışırken embedding ve reranker Mac mini'de yerel çalışır; haber metni dışarı çıkmaz.
+
+```
+soru ─► BM25 (ES) ─┐
+                    ├─ RRF ─► ilgililik süzgeci ─► reranker (bge-reranker-v2-m3) ─► en iyi RAG_TOP_K ─► LLM
+soru ─► kNN (ES) ──┘          (en fazla RAG_RERANK_CANDIDATES aday)
+```
+
+1. **Embedding (bge-m3, Ollama):**
+   ```bash
+   ollama pull bge-m3
+   ```
+   `.env`: `OLLAMA_EMBEDDING_MODEL=bge-m3`, `OLLAMA_EMBEDDING_BASE_URL=http://host.docker.internal:11434`,
+   `EMBEDDING_DIMS=1024`. Eski haberler için bir kez: `docker compose run --rm api scraperhryt embed-backfill --since-days 0`.
+2. **Reranker (bge-reranker-v2-m3, llama.cpp, Metal hızlandırmalı):**
+   ```bash
+   brew install llama.cpp
+   llama-server --hf-repo gpustack/bge-reranker-v2-m3-GGUF --hf-file bge-reranker-v2-m3-Q8_0.gguf \
+     --reranking --port 8012 -c 8192 -b 2048 -ub 2048
+   ```
+   `.env`: `RERANKER_URL=http://host.docker.internal:8012`, `RERANKER_API=llamacpp`. HuggingFace Text Embeddings
+   Inference kullanılacaksa `RERANKER_API=tei`.
+3. `docker compose up -d` — `setup` çıktısında "Reranker OK" görünür.
+
+Reranker ya da embedding sunucusu erişilemezse soru-cevap kelime aramasının sıralamasıyla çalışmaya devam eder.
+Tüm arama Elasticsearch'te kalır (BM25 + kNN); reranker yalnızca bulunan adayları yeniden sıralar.

@@ -224,6 +224,16 @@ class OllamaClient:
             verify=ollama_tls_verify(settings),
             headers={"User-Agent": settings.user_agent, "Accept": "application/json"},
         )
+        # Embedding ayrı bir Ollama'daysa (ör. LLM uzak sunucuda, bge-m3 yerelde) vektör istekleri oraya gider.
+        self._embed_client: OllamaClient | None = None
+        embed_url = (settings.ollama_embedding_base_url or "").rstrip("/")
+        if embed_url and embed_url != self._base_url:
+            self._embed_client = OllamaClient(
+                settings.model_copy(
+                    update={"ollama_base_url": embed_url, "ollama_embedding_base_url": "", "ollama_ca_bundle": "", "ollama_verify_tls": True}
+                ),
+                transport=transport,
+            )
 
     # --- yaşam döngüsü ---
     @property
@@ -241,6 +251,8 @@ class OllamaClient:
 
     def close(self) -> None:
         self._client.close()
+        if self._embed_client is not None:
+            self._embed_client.close()
 
     def __enter__(self) -> OllamaClient:
         return self
@@ -342,6 +354,8 @@ class OllamaClient:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Metinleri vektörler; boş metinler için sıfır vektör döner (sıra ve uzunluk korunur)."""
+        if self._embed_client is not None:
+            return self._embed_client.embed(texts)
         indexed = [(i, t) for i, t in enumerate(texts) if isinstance(t, str) and t.strip()]
         vectors = self._embed_batch([t for _, t in indexed]) if indexed else []
         if len(vectors) != len(indexed):
