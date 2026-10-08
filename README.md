@@ -443,8 +443,8 @@ aynı haber ikinci kez işlenirse belge üzerine yazılır (yinelenme olmaz).
 
 ### SQL asıl kayıt, Elasticsearch arama indeksi
 
-Elasticsearch bir veritabanı değil arama motorudur. `DATABASE_URL` ayarlıysa (Docker Compose'da varsayılan olarak
-açık, PostgreSQL 16) her haber, alarm, rapor ve geri bildirim **önce SQL'e** (asıl kayıt), sonra Elasticsearch'e
+Elasticsearch bir veritabanı değil arama motorudur. `DATABASE_URL` ayarlıysa (şimdilik kapalı; açmak için bir
+PostgreSQL adresi verin) her haber, alarm, rapor ve geri bildirim **önce SQL'e** (asıl kayıt), sonra Elasticsearch'e
 yazılır. **Tüm arama işlemleri** (haber arama, soru-cevap, alarm/rapor listeleri, istatistik, benzer alarm, kNN)
 Elasticsearch'ten yapılır; SQL yalnızca kimlikle okuma ve indeksi baştan kurmak için okunur.
 
