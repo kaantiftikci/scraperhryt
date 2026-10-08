@@ -80,19 +80,19 @@
     .filters-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; align-items: end; }
     .note { color: var(--muted); font-size: 14px; min-height: 1.4em; margin: 0; font-variant-numeric: tabular-nums; }
 
-    /* haber kartları: satırda üç kare */
+    /* haber kartları: satırda üç; başlık 2, önizleme 3 satır sabit */
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
     .grid > .empty { grid-column: 1 / -1; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; aspect-ratio: 1 / 1; align-self: stretch; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .card.alarm { border-top: 3px solid var(--critical); }
     .card .meta { display: flex; gap: 8px; justify-content: space-between; align-items: center; font: 12px var(--font-data); color: var(--muted); }
     .card .meta .when { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .card h3 { margin: 0; font: 600 17px/1.35 var(--font-body); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+    .card h3 { margin: 0; font: 600 17px/1.35 var(--font-body); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-height: 2.7em; }
     .card h3 a { color: var(--ink); text-decoration: none; }
     .card h3 a:hover { text-decoration: underline; }
-    .card .text { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
+    .card .text { margin: 0; font-size: 14px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: 4.5em; }
     .card .reason { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--critical) 7%, transparent); font-size: 14px; }
-    .card .reason p { margin: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+    .card .reason p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: 4.5em; }
     .card .foot { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .badge, .chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font: 500 12px var(--font-data); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
     .badge.critical { color: var(--critical); border-color: var(--critical); }
@@ -115,7 +115,6 @@
     @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 600px) {
       .grid { grid-template-columns: minmax(0, 1fr); }
-      .card { aspect-ratio: auto; }
       header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; }
       .tabs button { padding: 10px 9px; font-size: 14px; } .tabs .count { display: none; }
     }

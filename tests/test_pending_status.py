@@ -128,7 +128,7 @@ def test_ui_has_no_emoji_or_icons_and_shows_news_as_cards() -> None:
         text = page.read_text(encoding="utf-8")
         assert not _re.search("[\U0001F300-\U0001FAFF☀-➿←-⇿■-◿]", text), page.name
         assert "<svg" not in text and "<symbol" not in text and 'role="progressbar"' in text
-        assert "repeat(3, minmax(0, 1fr))" in text and "aspect-ratio: 1 / 1" in text
+        assert "repeat(3, minmax(0, 1fr))" in text and "-webkit-line-clamp: 2" in text and "-webkit-line-clamp: 3" in text
 
 
 def test_ask_ui_shows_elapsed_time_and_aborts_after_server_limits() -> None:
