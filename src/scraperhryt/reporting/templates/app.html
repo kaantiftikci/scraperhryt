@@ -339,7 +339,9 @@
     try {
       const r = await fetch("/articles/search?" + p.toString());
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-      const items = (await r.json()).results || [];
+      const stamp = (d) => { const t = Date.parse(d.published_at || ""); return isNaN(t) ? 0 : t; };
+      /* en ilgili haberler bulunur, en yeniden en eskiye gösterilir */
+      const items = ((await r.json()).results || []).slice().sort((a, b) => stamp(b) - stamp(a));
       $("search-note").textContent = q ? `${items.length} sonuç · "${q}"` : `${items.length} en yeni haber`;
       $("results").innerHTML = items.length ? items.map((d) => renderArticle(d, q)).join("") : `<p class="empty">Sonuç yok. Terimi kısaltmayı ya da süreyi genişletmeyi deneyin.</p>`;
     } catch (e) { $("search-note").textContent = "Arama yapılamadı: " + e.message; }
@@ -373,7 +375,7 @@
       const sources = (answer.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${safeUrl(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
       $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(answer.answer)}</p>` +
         (sources ? `<details class="sources"><summary>Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
-          (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi · eskiden yeniye</h2><ol class="timeline">${timeline}</ol>` : "") +
+          (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi · yeniden eskiye</h2><ol class="timeline">${timeline}</ol>` : "") +
           `<h2 class="small" style="margin-top:10px">Kaynaklar</h2><ol class="srcs">${sources}</ol></details>` : "") + `</article>`;
     } catch (e) {
       $("ask-note").textContent = e.name === "AbortError"

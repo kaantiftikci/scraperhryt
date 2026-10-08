@@ -697,8 +697,11 @@ def test_es_recent_and_reports_sorting_and_filters() -> None:
     rec_call, alarm_call, rep_call = stub.of("search")
     assert rec_call["sort"] == [{"@timestamp": {"order": "desc"}}] and rec_call["size"] == 7
     assert {"term": {"is_alarm": True}} in rec_call["query"]["bool"]["filter"]
-    assert alarm_call["index"] == "news-alarms" and alarm_call["sort"] == [{"raised_at": {"order": "desc"}}]
-    assert alarm_call["query"]["bool"]["filter"] == [{"range": {"raised_at": {"gte": since.isoformat()}}}]
+    assert alarm_call["index"] == "news-alarms"
+    assert alarm_call["sort"] == [{"published_at": {"order": "desc", "missing": "_last"}}, {"raised_at": {"order": "desc"}}]
+    should = alarm_call["query"]["bool"]["should"]
+    assert should[0] == {"range": {"published_at": {"gte": since.isoformat()}}}
+    assert should[1]["bool"]["filter"] == [{"range": {"raised_at": {"gte": since.isoformat()}}}]
     assert rep_call["index"] == "news-reports" and rep_call["query"]["bool"]["filter"] == [{"term": {"kind": "periodic"}}]
     assert rep_call["sort"] == [{"generated_at": {"order": "desc"}}]
 

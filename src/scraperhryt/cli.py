@@ -597,7 +597,14 @@ def published_counts(broker: InMemoryBroker) -> dict[str, int]:
 
 def top_alarms(store: Any, since: datetime, limit: int = TOP_ALARMS) -> list[dict[str, Any]]:
     """Depodaki (bu çalıştırmada üretilen) alarmları skora göre sıralar."""
-    docs = store.recent_alarms(since=since, size=max(limit * 20, 100))
+    # recent_alarms haber tarihine göre süzer; "bu çalıştırmada üretilen" için alarm zamanına (raised_at) bakılır.
+    from .reporting.prompts import parse_datetime
+
+    docs = [
+        doc
+        for doc in store.recent_alarms(size=max(limit * 20, 200))
+        if (raised := parse_datetime(doc.get("raised_at"))) is not None and raised >= since
+    ]
     ranked = sorted(docs, key=lambda doc: int(doc.get("alarm_score", 0) or 0), reverse=True)
     return ranked[:limit]
 

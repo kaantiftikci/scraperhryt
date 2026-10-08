@@ -728,12 +728,32 @@ class ElasticsearchStore:
         return [h.doc for h in _hits_to_search_hits(res)]
 
     def recent_alarms(self, since: datetime | None = None, size: int = 50) -> list[dict[str, Any]]:
-        ts = _range_filter("raised_at", since, None)
+        """En yeni haber önce (``published_at``); haber tarihi yoksa alarm zamanı (``raised_at``) kullanılır.
+
+        Arşivden geç gelen eski bir haber yeni alarm üretse de listede haberin kendi tarihine göre yer alır.
+        """
+        query: dict[str, Any] = {"match_all": {}}
+        if since is not None:
+            iso = _aware(since).isoformat()
+            query = {
+                "bool": {
+                    "should": [
+                        {"range": {"published_at": {"gte": iso}}},
+                        {
+                            "bool": {
+                                "must_not": [{"exists": {"field": "published_at"}}],
+                                "filter": [{"range": {"raised_at": {"gte": iso}}}],
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
         res = self.es.search(
             index=self.index_alarms,
-            query={"bool": {"filter": [ts]}} if ts else {"match_all": {}},
+            query=query,
             size=size,
-            sort=[{"raised_at": {"order": "desc"}}],
+            sort=[{"published_at": {"order": "desc", "missing": "_last"}}, {"raised_at": {"order": "desc"}}],
         )
         return [h.doc for h in _hits_to_search_hits(res)]
 
@@ -1056,7 +1076,7 @@ class InMemoryStore:
         since_dt = _aware(since) if since else None
         with self._lock:
             docs = [dict(d) for d in self.alarms.values()]
-        items = [(_parse_dt(d.get("raised_at")) or _doc_timestamp(d), d) for d in docs]
+        items = [(_parse_dt(d.get("published_at")) or _parse_dt(d.get("raised_at")) or _doc_timestamp(d), d) for d in docs]
         if since_dt is not None:
             items = [(ts, d) for ts, d in items if ts >= since_dt]
         items.sort(key=lambda item: (-item[0].timestamp(), str(item[1].get("alarm_id", ""))))

@@ -440,7 +440,7 @@ class QAEngine:
 
 
 def build_timeline(citations: Sequence[Citation]) -> list[TimelineItem]:
-    """Atıflardan kronolojik (eski → yeni) zaman çizelgesi: her kaynak bir olay satırı, [n] numarasıyla."""
+    """Atıflardan zaman çizelgesi, en yeni olay önce: her kaynak bir olay satırı, [n] numarasıyla."""
     items = [
         TimelineItem(
             date=c.published_at,
@@ -451,7 +451,7 @@ def build_timeline(citations: Sequence[Citation]) -> list[TimelineItem]:
         )
         for i, c in enumerate(citations, 1)
     ]
-    dated = sorted((it for it in items if it.date is not None), key=lambda it: it.date)  # type: ignore[arg-type]
+    dated = sorted((it for it in items if it.date is not None), key=lambda it: it.date, reverse=True)  # type: ignore[arg-type]
     undated = [it for it in items if it.date is None]
     return dated + undated
 

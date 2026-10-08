@@ -225,8 +225,8 @@ def test_answer_has_chronological_timeline() -> None:
         store.index_record(make_record(title, f"içerik {i}", days_ago=days))
     answer = QAEngine(s, store, FakeOllama(responder=lambda sy, u: {"answer": "cevap"})).ask("Özgür Özel ile Kılıçdaroğlu arasındaki son durum ne?")
     dates = [t.date for t in answer.timeline]
-    assert len(answer.timeline) == 3 and dates == sorted(dates)
-    assert answer.timeline[-1].event.startswith("Kılıçdaroğlu'ndan")
+    assert len(answer.timeline) == 3 and dates == sorted(dates, reverse=True)
+    assert answer.timeline[0].event.startswith("Kılıçdaroğlu'ndan")
 
 
 # ---- ölü mektup ----
