@@ -14,6 +14,7 @@ Reranker erişilemezse ya da hata verirse ``None`` döner ve soru-cevap mevcut s
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -39,7 +40,7 @@ class Reranker:
         self._client.close()
 
     def scores(self, query: str, documents: Sequence[str]) -> list[float] | None:
-        """``documents`` ile aynı sırada ilgililik skorları; hata durumunda ``None``."""
+        """``documents`` ile aynı sırada 0-1 ilgililik olasılıkları; hata durumunda ``None``."""
         docs = [doc[: self.settings.reranker_max_chars] for doc in documents]
         if not docs:
             return []
@@ -56,7 +57,7 @@ class Reranker:
                 body = resp.json()
                 items = body.get("results") if isinstance(body, dict) else body
                 key = "relevance_score"
-            return _align(items, key, len(docs))
+            return _probabilities(_align(items, key, len(docs)))
         except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
             log.warning("Reranker kullanılamadı (%s); mevcut sıralamayla devam ediliyor: %s", self.base_url, exc)
             return None
@@ -73,6 +74,16 @@ def _align(items: Any, key: str, n: int) -> list[float]:
     if any(s == float("-inf") for s in scores):
         raise ValueError("reranker her aday için skor döndürmedi")
     return scores
+
+
+def _probabilities(scores: list[float]) -> list[float]:
+    """Skorları 0-1 olasılığa çevirir: llama.cpp ham logit döndürür (TEI zaten sigmoid uygular).
+
+    Skorlardan biri [0, 1] dışındaysa hepsi logittir ve sigmoid uygulanır; böylece taban eşik iki API'de aynıdır.
+    """
+    if all(0.0 <= s <= 1.0 for s in scores):
+        return scores
+    return [1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, s)))) for s in scores]
 
 
 def rerank_text(doc: dict[str, Any]) -> str:

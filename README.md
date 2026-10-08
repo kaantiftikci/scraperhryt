@@ -628,5 +628,10 @@ soru ─► kNN (ES) ──┘          (en fazla RAG_RERANK_CANDIDATES aday)
    Inference kullanılacaksa `RERANKER_API=tei`.
 3. `docker compose up -d` — `setup` çıktısında "Reranker OK" görünür.
 
+Seçim iki ölçütün ortak kararıdır: sorunun sözcüklerini iyi kapsayan haberler adaydır; sözcüklerin yalnızca bir
+kısmını içeren haber (konuyu eş anlamlı sözcükle anlatan: "soruşturma" yerine "vurgun") reranker onu kapsayan
+haberlerin ortanca puanından yüksek bulursa geri alınır. Reranker'ın ilgililik olasılığı `RAG_RERANK_MIN_SCORE`
+(0.02) altında kalan haberler elenir, en iyi `RAG_RERANK_MIN_KEEP` (3) haber her durumda kalır.
+
 Reranker ya da embedding sunucusu erişilemezse soru-cevap kelime aramasının sıralamasıyla çalışmaya devam eder.
 Tüm arama Elasticsearch'te kalır (BM25 + kNN); reranker yalnızca bulunan adayları yeniden sıralar.

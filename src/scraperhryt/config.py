@@ -146,6 +146,11 @@ class Settings(BaseSettings):
     reranker_timeout: float = 15.0
     reranker_max_chars: int = 1500  # aday başına reranker'a giden metin (başlık + alt başlık + içerik başı)
     rag_rerank_candidates: int = 30  # reranker'a verilen en fazla aday
+    # Reranker'ın 0-1 ölçeğindeki ilgililik olasılığı bunun altında kalan haber modele verilmez (en iyi
+    # RAG_RERANK_MIN_KEEP haber her durumda kalır); 0 kapatır. 26 soruluk gerçek haber ölçümünde 0.02 kesinliği
+    # 0.65'ten 0.79'a çıkarıp anahtar haberleri korudu; daha yüksek eşikler ilgili haber kaybettirmeye başladı.
+    rag_rerank_min_score: float = 0.02
+    rag_rerank_min_keep: int = 3
     rag_answer_timeout: float = 90.0
 
     # ---- Türetilmiş yardımcılar ----

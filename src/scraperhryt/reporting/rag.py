@@ -307,6 +307,8 @@ class QAEngine:
     def select(self, question: str, gate: Sequence[RankedDoc], strict: Sequence[RankedDoc], size: int) -> list[RankedDoc]:
         """Modele gidecek haberleri seçer: sözcüksel süzgeç ile reranker'ın ortak kararı.
 
+        Reranker'ın ``rag_rerank_min_score`` altında puanladığı haberler (en iyi ``rag_rerank_min_keep`` hariç) elenir.
+
         Reranker yoksa (ya da yanıt vermezse) yalnızca sözcüksel olarak soruyu iyi kapsayan ``strict`` haberler
         kullanılır. Reranker varsa ``strict`` haberlerin yanında, soru sözcüklerinden yalnızca bir kısmını içerdiği
         için eşiğe takılan ``gate`` haberleri de puanlanır; bunlardan biri, reranker'ın ``strict`` haberlere verdiği
@@ -331,6 +333,9 @@ class QAEngine:
         chosen = [i for i in range(len(candidates)) if i < len(core) or scores[i] >= bar]
         rescued = len(chosen) - len(core)
         chosen.sort(key=lambda i: scores[i], reverse=True)
+        # Taban: reranker'ın neredeyse ilgisiz bulduğu haberler (çoğunlukla tek ortak sözcüklü) modele gitmez.
+        floor, keep = self.settings.rag_rerank_min_score, max(1, self.settings.rag_rerank_min_keep)
+        chosen = [i for rank, i in enumerate(chosen) if rank < keep or floor <= 0 or scores[i] >= floor]
         log.info(
             "Reranker %d adaydan %d haber seçti (%d tanesi sözcüksel eşiğe takılmıştı, en yüksek skor %.3f)",
             len(candidates), min(size, len(chosen)), rescued, scores[chosen[0]],

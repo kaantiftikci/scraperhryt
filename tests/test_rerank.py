@@ -179,7 +179,7 @@ def test_select_rescues_gate_document_only_when_reranker_rates_it_above_strict_m
     strict = [_rd("s1", "güçlü A"), _rd("s2", "orta B"), _rd("s3", "zayıf C")]
     synonym, noise = _rd("g1", "eş anlamlı D"), _rd("g2", "gürültü E")
     reranker = _ScoreReranker({"güçlü": 6.0, "orta": 2.0, "zayıf": -3.0, "eş anlamlı": 4.0, "gürültü": 0.5})
-    qa = QAEngine(Settings(_env_file=None), InMemoryStore(), FakeOllama(), reranker=reranker)
+    qa = QAEngine(Settings(_env_file=None, rag_rerank_min_score=0), InMemoryStore(), FakeOllama(), reranker=reranker)
     picked = [d.doc["id"] for d in qa.select("soru", strict + [synonym, noise], strict, 10)]
     # g1 (4.0) sıkı haberlerin ortancasından (2.0) yüksek → geri alınır; g2 (0.5) düşük → elenir; sıkı haberler kalır.
     assert picked == ["s1", "g1", "s2", "s3"]
@@ -228,3 +228,23 @@ def test_synonym_worded_news_reaches_answer_with_reranker() -> None:
         "fon soruşturmasında en son ortaya çıkan 2 kişi kim"
     )
     assert "Fon vurgununda 2 isim daha ortaya çıktı" not in [c.title for c in plain.sources]
+
+
+def test_select_drops_documents_below_reranker_floor_but_keeps_best_few() -> None:
+    from scraperhryt.store import InMemoryStore
+
+    strict = [_rd(f"s{i}", f"haber {i}") for i in range(5)]
+    reranker = _ScoreReranker({"haber 0": 0.9, "haber 1": 0.4, "haber 2": 0.0004, "haber 3": 0.0002, "haber 4": 0.0001})
+    s = Settings(_env_file=None, rag_rerank_min_score=0.001, rag_rerank_min_keep=1)
+    qa = QAEngine(s, InMemoryStore(), FakeOllama(), reranker=reranker)
+    assert [d.doc["id"] for d in qa.select("soru", strict, strict, 10)] == ["s0", "s1"]
+    qa.settings = s.model_copy(update={"rag_rerank_min_keep": 3})
+    assert [d.doc["id"] for d in qa.select("soru", strict, strict, 10)] == ["s0", "s1", "s2"]
+
+
+def test_llamacpp_logits_are_converted_to_probabilities() -> None:
+    def llama(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 4.0}, {"index": 1, "relevance_score": -9.0}]})
+
+    p_hi, p_lo = _reranker("llamacpp", llama).scores("soru", ["a", "b"])
+    assert 0.98 < p_hi < 0.99 and p_lo < 0.001
