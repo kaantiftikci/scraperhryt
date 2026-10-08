@@ -1063,3 +1063,15 @@ def test_api_dashboard_shows_error_when_store_fails(settings: Settings) -> None:
     http = TestClient(create_app(settings, BrokenStore(), FakeOllama()))
     res = http.get("/")
     assert res.status_code == 200 and "Veri alınamadı" in res.text
+
+
+def test_split_narrative_separates_executive_summary_from_sections() -> None:
+    from scraperhryt.reporting.api import split_narrative
+
+    summary, details = split_narrative(
+        "Yönetici özeti: Pencerede 134 haber işlendi; 10 tanesi alarm.\nÖne çıkan gelişmeler:\n- [85] Fon\nDağılım: hurriyet 40"
+    )
+    assert summary == "Pencerede 134 haber işlendi; 10 tanesi alarm."
+    assert details.startswith("Öne çıkan gelişmeler:") and "Dağılım: hurriyet 40" in details
+    assert split_narrative("**Yönetici özeti:** Kısa özet.\n\n## Dağılım\nx") == ("Kısa özet.", "Dağılım\nx")
+    assert split_narrative("") == ("", "")

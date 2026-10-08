@@ -101,8 +101,7 @@
     .badge.routine { color: var(--ok); border-color: var(--ok); }
     .chip.kw { color: var(--accent); border-color: var(--accent); }
     .chip.review { color: var(--important); border-color: var(--important); }
-    mark { background: var(--mark); color: inherit; padding: 0 2px; border-radius: 3px; }
-
+    
     /* soru cevabı ve raporlar: tam genişlik */
     .block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
     .answer { white-space: pre-wrap; max-width: 75ch; margin: 0; }
@@ -110,9 +109,23 @@
     ol.timeline, ol.srcs { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
     .tdate { font: 12px var(--font-data); color: var(--muted); margin-right: 6px; }
     .block .meta { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; font: 13px var(--font-data); color: var(--muted); }
-    .narrative { white-space: pre-wrap; margin: 0; max-width: 75ch; }
+    form.ask { display: grid; gap: 8px; width: 100%; max-width: 760px; margin: 8px auto 4px; padding: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+    form.ask label { font-size: 13px; }
+    form.ask input { height: 48px; font-size: 16px; }
+    form.ask .note { font-size: 13px; }
+    #ask-result:empty { display: none; }
+    .reports { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+    .reports > .empty { grid-column: 1 / -1; }
+    .report { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .report-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    .report-head h3 { margin: 0; font: 600 16px/1.3 var(--font-body); }
+    .report-stats { font: 12px var(--font-data); color: var(--muted); white-space: nowrap; }
+    .report-when { font: 12px var(--font-data); color: var(--muted); }
+    .report-summary { margin: 0; font-size: 14px; line-height: 1.5; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+    .report-more summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+    .report-body { margin-top: 8px; white-space: pre-line; font-size: 14px; line-height: 1.55; color: var(--muted); max-height: 420px; overflow-y: auto; }
 
-    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .reports { grid-template-columns: minmax(0, 1fr); } }
     @media (max-width: 600px) {
       .grid { grid-template-columns: minmax(0, 1fr); }
       header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; }
@@ -141,41 +154,30 @@
 
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-search" aria-selected="true" data-tab="search">Ara</button>
-    <button role="tab" id="tab-ask" aria-selected="false" data-tab="ask">Soru sor</button>
     <button role="tab" id="tab-alarms" aria-selected="false" data-tab="alarms">Alarmlar<span class="count">{{ alarms | length }}</span></button>
     <button role="tab" id="tab-reports" aria-selected="false" data-tab="reports">Raporlar<span class="count">{{ reports | length }}</span></button>
   </div>
 
   <section class="panel" id="panel-search" role="tabpanel" aria-labelledby="tab-search">
-    <form class="bar" id="search-form">
+    <form class="ask" id="ask-form">
+      <label for="question">Soru sor</label>
       <div class="main-row">
-        <div class="field"><label for="q">Arama</label><input id="q" name="q" placeholder="fon soruşturması, Özgür Özel, bakan açıklaması…"></div>
-        <button class="primary" type="submit">Ara</button>
+        <input id="question" placeholder="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" minlength="2" required>
+        <button class="primary" type="submit" id="ask-btn">Sor</button>
       </div>
-      <details class="filters"><summary>Filtreler</summary>
-        <div class="filters-grid">
-          <div class="field"><label for="source">Kaynak</label><select id="source"><option value="">Tümü</option><option value="hurriyet">Hürriyet</option><option value="12punto">12punto</option></select></div>
-          <div class="field"><label for="since">Son N gün</label><input id="since" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div>
-          <div class="field"><label for="only-alarms">Yalnızca alarm</label><select id="only-alarms"><option value="false">Hayır</option><option value="true">Evet</option></select></div>
-        </div>
-      </details>
+      <p class="note" id="ask-note">Cevap, aşağıdaki filtrelere uyan en yeni haberlerin tam metnine dayanır.</p>
+      <div id="ask-result"></div>
+    </form>
+
+    <form class="bar" id="filter-form">
+      <div class="filters-grid">
+        <div class="field"><label for="source">Kaynak</label><select id="source"><option value="">Tümü</option><option value="hurriyet">Hürriyet</option><option value="12punto">12punto</option></select></div>
+        <div class="field"><label for="since">Son N gün</label><input id="since" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div>
+        <div class="field"><label for="only-alarms">Yalnızca alarm</label><select id="only-alarms"><option value="false">Hayır</option><option value="true">Evet</option></select></div>
+      </div>
     </form>
     <p class="note" id="search-note">En yeni haberler yükleniyor…</p>
     <div class="grid" id="results"></div>
-  </section>
-
-  <section class="panel" id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden>
-    <form class="bar" id="ask-form">
-      <div class="main-row">
-        <div class="field"><label for="question">Soru</label><input id="question" placeholder="Özgür Özel ile Kemal Kılıçdaroğlu arasındaki son durum ne?" minlength="2" required></div>
-        <button class="primary" type="submit" id="ask-btn">Sor</button>
-      </div>
-      <details class="filters"><summary>Filtreler</summary>
-        <div class="filters-grid"><div class="field"><label for="ask-days">Son N gün</label><input id="ask-days" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div></div>
-      </details>
-    </form>
-    <p class="note" id="ask-note">Cevap, en yeni haberlerin tam metnine dayanır; kaynaklar cevabın altında açılır.</p>
-    <div id="ask-result"></div>
   </section>
 
   <section class="panel" id="panel-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
@@ -202,12 +204,19 @@
   </section>
 
   <section class="panel" id="panel-reports" role="tabpanel" aria-labelledby="tab-reports" hidden>
+    <div class="reports">
     {% for r in reports %}
-    <article class="block">
-      <div class="meta"><span class="chip">{{ r.kind | kind_label }}</span><span>{{ r.window_start | tr_dt }} – {{ r.window_end | tr_dt }}</span><span>{{ r.total }} haber · {{ r.alarms }} alarm</span></div>
-      {% if r.narrative %}<p class="narrative">{{ r.narrative }}</p>{% endif %}
-    </article>
-    {% else %}<p class="empty">Henüz rapor yok. Raporlama katmanı saatlik ve alarm özeti raporları üretir.</p>{% endfor %}
+      <article class="report">
+        <div class="report-head">
+          <h3>{{ r.kind | kind_label }}</h3>
+          <span class="report-stats">{{ r.total }} haber · {{ r.alarms }} alarm</span>
+        </div>
+        <div class="report-when">{{ r.window_start | tr_dt }} – {{ r.window_end | tr_dt }}</div>
+        {% if r.summary %}<p class="report-summary">{{ r.summary }}</p>{% endif %}
+        {% if r.details %}<details class="report-more"><summary>Raporun tamamı</summary><div class="report-body">{{ r.details }}</div></details>{% endif %}
+      </article>
+    {% else %}<p class="empty">Henüz rapor yok. Raporlama katmanı saatlik rapor ve alarm özeti üretir.</p>{% endfor %}
+    </div>
   </section>
 </div>
 
@@ -229,13 +238,6 @@
   const ago = (sec) => sec == null ? "-" : sec < 90 ? `${sec} sn önce` : sec < 5400 ? `${Math.round(sec / 60)} dk önce` : `${Math.round(sec / 3600)} sa önce`;
   const scoreClass = (s) => s >= 80 ? "critical" : s >= 60 ? "important" : s >= 30 ? "notable" : "routine";
   const chips = (kws) => (kws || []).slice(0, 3).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("");
-  const highlight = (text, q) => {
-    const raw = String(text || "");
-    const words = (q || "").split(/\s+/).filter((w) => w.length > 2).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    if (!words.length) return esc(raw);
-    const re = new RegExp("((?:" + words.join("|") + ")[\\p{L}\\p{N}]*)", "giu");
-    return raw.split(re).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join("");
-  };
 
   /* sekmeler */
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
@@ -307,37 +309,35 @@
     statusTimer = setTimeout(loadStatus, next);
   }
 
-  /* arama */
-  function renderArticle(doc, q) {
-    const sub = (doc.subtitle || "").trim();
-    const snippet = (doc.snippet || "").trim();
-    const text = q && snippet ? snippet : (sub || snippet);
+  /* haber listesi */
+  function renderArticle(doc) {
+    const text = (doc.subtitle || "").trim() || (doc.snippet || "").trim();
     const score = Number(doc.alarm_score || 0);
     return `<article class="card${doc.is_alarm ? " alarm" : ""}">
       <div class="meta"><span class="when">${esc(doc.source)} · ${fmtDate(doc.published_at)}</span>${doc.is_alarm ? `<span class="badge ${scoreClass(score)}">alarm ${score}</span>` : ""}</div>
       <h3><a href="${safeUrl(doc.content_url)}" target="_blank" rel="noopener">${esc(doc.title)}</a></h3>
-      ${text ? `<p class="text">${highlight(text, q)}</p>` : ""}
+      ${text ? `<p class="text">${esc(text)}</p>` : ""}
       <div class="foot">${chips(doc.matched_keywords)}</div>
     </article>`;
   }
   async function search(ev) {
     if (ev) ev.preventDefault();
-    const q = $("q").value.trim();
-    const p = new URLSearchParams({ q, size: 30, only_alarms: $("only-alarms").value });
+    const p = new URLSearchParams({ q: "", size: 30, only_alarms: $("only-alarms").value });
     if ($("source").value) p.set("sources", $("source").value);
     if ($("since").value) p.set("since_days", $("since").value);
-    $("search-note").textContent = "Aranıyor…";
+    $("search-note").textContent = "Yükleniyor…";
     try {
       const r = await fetch("/articles/search?" + p.toString());
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const stamp = (d) => { const t = Date.parse(d.published_at || ""); return isNaN(t) ? 0 : t; };
-      /* en ilgili haberler bulunur, en yeniden en eskiye gösterilir */
       const items = ((await r.json()).results || []).slice().sort((a, b) => stamp(b) - stamp(a));
-      $("search-note").textContent = q ? `${items.length} sonuç · "${q}"` : `${items.length} en yeni haber`;
-      $("results").innerHTML = items.length ? items.map((d) => renderArticle(d, q)).join("") : `<p class="empty">Sonuç yok. Terimi kısaltmayı ya da süreyi genişletmeyi deneyin.</p>`;
-    } catch (e) { $("search-note").textContent = "Arama yapılamadı: " + e.message; }
+      $("search-note").textContent = `${items.length} en yeni haber`;
+      $("results").innerHTML = items.length ? items.map(renderArticle).join("") : `<p class="empty">Bu filtrelerle haber yok. Süreyi genişletmeyi deneyin.</p>`;
+    } catch (e) { $("search-note").textContent = "Haberler yüklenemedi: " + e.message; }
   }
-  $("search-form").addEventListener("submit", search);
+  /* filtreler değişince liste kendiliğinden yenilenir */
+  $("filter-form").addEventListener("submit", search);
+  ["source", "since", "only-alarms"].forEach((id) => $(id).addEventListener("change", () => search()));
 
   /* soru */
   async function ask(ev) {
@@ -354,7 +354,7 @@
     const ctrl = new AbortController();
     const limit = setTimeout(() => ctrl.abort(), ASK_LIMIT_MS);
     try {
-      const r = await fetch("/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("ask-days").value) || undefined }) });
+      const r = await fetch("/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("since").value) || undefined, sources: $("source").value ? [$("source").value] : undefined }) });
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const answer = await r.json();
       const secs = Math.round((Date.now() - started) / 1000);

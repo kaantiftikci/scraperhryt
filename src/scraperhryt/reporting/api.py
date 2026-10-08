@@ -17,6 +17,7 @@ başarısızsa raporu yine ``published=false`` ile döndürür (``ReportPublishe
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
@@ -553,10 +554,45 @@ def _report_view(doc: Mapping[str, Any]) -> dict[str, Any]:
         "generated_at": doc.get("generated_at"),
         "model": str(doc.get("model") or "-"),
         "narrative": str(doc.get("narrative") or ""),
+        **dict(zip(("summary", "details"), split_narrative(str(doc.get("narrative") or "")), strict=True)),
         "total": _as_int(stats.get("total")),
         "alarms": _as_int(stats.get("alarms")),
         "top_alarm_count": len(top),
     }
+
+
+_MD_MARKUP_RE = re.compile(r"(\*\*|__|^#{1,6}\s*)", re.M)
+_SUMMARY_HEAD_RE = re.compile(r"^\s*yönetici özeti\s*:?\s*", re.I)
+_SECTION_RE = re.compile(r"^\s*(yönetici özeti|öne çıkan gelişmeler|dağılım|izlenmesi gerekenler|not)\b", re.I)
+
+
+def split_narrative(text: str) -> tuple[str, str]:
+    """Rapor anlatısını arayüz için ayırır: (yönetici özeti, geri kalanı). Markdown işaretleri temizlenir.
+
+    "Yönetici özeti" başlığı varsa onun paragrafı, yoksa ilk paragraf özet olur; kalan bölümler katlanır.
+    """
+    clean = _MD_MARKUP_RE.sub("", text or "").strip()
+    if not clean:
+        return "", ""
+    paragraphs: list[str] = []
+    for line in clean.splitlines():
+        if not line.strip():
+            paragraphs.append("")
+        elif _SECTION_RE.match(line) or not paragraphs:
+            paragraphs.append(line.strip())
+        else:
+            paragraphs[-1] = f"{paragraphs[-1]}\n{line.strip()}".strip()
+    paragraphs = [p for p in paragraphs if p]
+    index = next((i for i, p in enumerate(paragraphs) if _SUMMARY_HEAD_RE.match(p)), 0)
+    head = paragraphs[index]
+    summary = _SUMMARY_HEAD_RE.sub("", head, count=1).strip()
+    rest = paragraphs[:index] + paragraphs[index + 1 :]
+    if not summary and rest:  # başlık tek başına bir satırsa özet sonraki paragraftır
+        summary = rest.pop(index if index < len(rest) else 0)
+    lines = summary.splitlines()
+    if len(lines) > 1 and _SUMMARY_HEAD_RE.match(lines[0] + ":"):
+        summary = " ".join(lines[1:])
+    return " ".join(summary.split()), "\n\n".join(rest)
 
 
 def _safe_bool(fn: Callable[[], bool], what: str) -> bool:

@@ -595,7 +595,7 @@ yalnızca `.env`'e yazın (`.env` git'e girmez).
 Tek sayfa: `http://localhost:8000/` (Docker'da `API_PORT` ile değiştirilebilir; eski `/ara` adresi buraya yönlenir).
 
 - **Durum şeridi:** son tarama, sonraki taramaya kalan süre, çekilemeyen (bekleyen) haberler ve uyarılar. Tarama sürerken canlı ilerleme çubuğu kaynağı, aşamayı ve yüzdeyi gösterir; turlar arasında çubuk sonraki taramaya kalan süreyi doldurur.
-- **Sekmeler:** Ara (filtreli tam metin arama), Soru sor (kısa özet; kaynaklar ve zaman çizelgesi açılır bölümde), Alarmlar, Raporlar.
+- **Sekmeler:** Ara (ortada soru kutusu; altında açık filtreler ve en yeni haberler), Alarmlar, Raporlar (yönetici özeti, tamamı açılır bölümde).
 - Haberler ve alarmlar kartlarda gösterilir (başlık 2, önizleme 3 satır sabit): geniş ekranda satırda üç, tablette iki, telefonda bir kart. Açık ve koyu tema desteklenir; ikon ve emoji kullanılmaz.
 - Sayısal özetler arayüzde değil API'de: `GET /stats?hours=24` (kaynak, anahtar kelime, kategori ve saatlik dağılım).
 
