@@ -22,7 +22,6 @@ _ISOLATED_ENV = {
     "TELEGRAM_CHAT_ID": "",
     "KEYWORD_ALIASES_PATH": "",  # testler eş anlamlı dosyasını açıkça seçer
     "ALARM_THRESHOLDS_JSON": "",
-    "DATABASE_URL": "",  # SQL kaydı testlerde açıkça (SQLite) kurulur
 }
 
 

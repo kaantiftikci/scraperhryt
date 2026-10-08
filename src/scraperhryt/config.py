@@ -82,7 +82,6 @@ class Settings(BaseSettings):
     llm_samples: int = 1  # >1 ise aynı haber N kez skorlanır, medyan alınır (öz-tutarlılık)
     llm_sample_temperature: float = 0.4  # çoklu örneklemede kullanılan sıcaklık
     llm_disagreement_threshold: int = 25  # örnekler arası skor farkı bunu aşarsa needs_review=True
-    llm_fewshot_examples: int = 0  # prompta altın setten eklenecek örnek sayısı
     golden_set_path: str = "config/golden_set.jsonl"  # etiketli kalibrasyon örnekleri
     rescore_batch_size: int = 50
 
@@ -100,8 +99,6 @@ class Settings(BaseSettings):
     punto_base_url: str = "https://12punto.com.tr"
     # 12punto'nun /rss/<kategori> beslemesi ve /<kategori> listesi olan tüm bölümler. Karışık /rss yalnızca son
     # 20 haberi verdiğinden listede olmayan bir bölüm, tarama aralığı uzadığında sessizce kaçar.
-    hurriyet_deep_pages: int = 0  # >0 ise Playwright ile Hürriyet gündem listesinde JS sayfalama/"daha fazla" ile bu kadar sayfa derin taranır
-    deep_crawl_timeout: float = 60.0
     punto_categories: str = (
         "gundem,siyaset,dunya,ekonomi,yasam,spor,bilim-teknoloji,kulis,medya,adalet-hukuk,"
         "yerel-haberler,kultur-sanat,saglik,egitim,cevre,turkiye,kamu-gundemi,is-dunyasi,secim,"
@@ -127,9 +124,6 @@ class Settings(BaseSettings):
     report_window_hours: int = 24
     report_digest_every: int = 10      # q.alarms'tan bu kadar alarm birikince alarm özeti raporu üret
     report_digest_minutes: int = 30    # ... veya en son özetten bu kadar dakika geçince
-    # Kalıcı kayıt veritabanı (SQLAlchemy URL'si). Doluysa her kayıt önce buraya, sonra Elasticsearch'e yazılır;
-    # aramalar yine Elasticsearch'ten yapılır. ör: postgresql+psycopg://news:news@postgres:5432/news
-    database_url: str = ""
     rag_top_k: int = 12
     rag_recency_days: int = 14
     # Soru-cevap süre sınırları (sn). Ollama skorlayıcıyla paylaşıldığından istek kuyrukta bekleyebilir; sınır
@@ -145,14 +139,6 @@ class Settings(BaseSettings):
     reranker_max_chars: int = 1500  # aday başına reranker'a giden metin (başlık + alt başlık + içerik başı)
     rag_rerank_candidates: int = 30  # reranker'a verilen en fazla aday
     rag_answer_timeout: float = 90.0
-    rag_hybrid: bool = True  # embedding modeli ayarlıysa BM25 + kNN (RRF) birleşik arama
-    rag_eval_path: str = "config/rag_eval.jsonl"
-    # Ani artış (burst) tespiti: aynı konu/varlık için pencere içinde en az N alarm → burst raporu
-    burst_window_minutes: int = 60
-    burst_min_articles: int = 5
-    # Prometheus metrikleri
-    metrics_enabled: bool = True
-    metrics_port: int = 9108
 
     # ---- Türetilmiş yardımcılar ----
     @property

@@ -70,7 +70,6 @@ class RoutingKey(StrEnum):
     ALARM_RAISED = "alarm.raised"
     REPORT_GENERATED = "report.generated"
     REPORT_ALARM_DIGEST = "report.alarm_digest"
-    REPORT_BURST = "report.burst"
 
 
 class Queue(StrEnum):
