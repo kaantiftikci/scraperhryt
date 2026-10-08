@@ -54,6 +54,8 @@ alarma gitmeyen kayıtlarda bu alanlar **boş kalır** ama nesne yine de hem Rab
 
 ## 3. Hızlı başlangıç (Docker Compose + host üzerinde Ollama)
 
+Adım adım kurulum (uzak LLM, yerel bge-m3 ve reranker ile): [`docs/KURULUM.md`](docs/KURULUM.md).
+
 Önkoşullar: Docker 24+ ve Compose v2; ana makinede [Ollama](https://ollama.com).
 
 ```bash
