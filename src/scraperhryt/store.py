@@ -1218,4 +1218,6 @@ def make_store(settings: Settings | None = None, *, in_memory: bool = False) -> 
     settings = settings or get_settings()
     if in_memory or settings.elasticsearch_url in ("memory://", "inmemory://"):
         return InMemoryStore()
-    return ElasticsearchStore(settings)
+    from .sqlstore import make_record_store  # DATABASE_URL doluysa: SQL asıl kayıt + ES arama indeksi
+
+    return make_record_store(settings, ElasticsearchStore(settings))

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     ollama_timeout: float = 180.0
     ollama_temperature: float = 0.1
     ollama_num_ctx: int = 8192
+    # Kendi imzalı sertifikalı Ollama sunucusu: önce sunucunun sertifikasını (PEM) OLLAMA_CA_BUNDLE ile vermeyi
+    # deneyin; olmuyorsa OLLAMA_VERIFY_TLS=false doğrulamayı kapatır (yalnızca güvenilen iç ağ sunucusu için).
+    ollama_verify_tls: bool = True
+    ollama_ca_bundle: str = ""
     ollama_max_content_chars: int = 6000  # LLM'e gönderilen haber metninin üst sınırı
     embedding_dims: int = 768  # ollama_embedding_model ayarlıysa dense_vector boyutu (nomic-embed-text=768)
 
@@ -121,6 +125,9 @@ class Settings(BaseSettings):
     report_window_hours: int = 24
     report_digest_every: int = 10      # q.alarms'tan bu kadar alarm birikince alarm özeti raporu üret
     report_digest_minutes: int = 30    # ... veya en son özetten bu kadar dakika geçince
+    # Kalıcı kayıt veritabanı (SQLAlchemy URL'si). Doluysa her kayıt önce buraya, sonra Elasticsearch'e yazılır;
+    # aramalar yine Elasticsearch'ten yapılır. ör: postgresql+psycopg://news:news@postgres:5432/news
+    database_url: str = ""
     rag_top_k: int = 12
     rag_recency_days: int = 14
     # Soru-cevap süre sınırları (sn). Ollama skorlayıcıyla paylaşıldığından istek kuyrukta bekleyebilir; sınır

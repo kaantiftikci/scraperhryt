@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import re
+import ssl
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -197,6 +198,15 @@ def redact_url(url: str) -> str:
 # ---------------------------------------------------------------------------------------------------------
 
 
+def ollama_tls_verify(settings: Settings) -> bool | ssl.SSLContext:
+    """httpx ``verify``: sertifika dosyası verildiyse onunla doğrular, yoksa ``OLLAMA_VERIFY_TLS`` (varsayılan açık)."""
+    if settings.ollama_ca_bundle:
+        return ssl.create_default_context(cafile=settings.ollama_ca_bundle)
+    if not settings.ollama_verify_tls:
+        log.warning("Ollama TLS sertifika doğrulaması KAPALI (OLLAMA_VERIFY_TLS=false); yalnızca güvenilen iç ağ sunucusu için")
+    return bool(settings.ollama_verify_tls)
+
+
 class OllamaClient:
     """Ollama HTTP API istemcisi (``/api/chat``, ``/api/generate``, ``/api/embed``, ``/api/tags``)."""
 
@@ -211,6 +221,7 @@ class OllamaClient:
             base_url=self._base_url,
             timeout=settings.ollama_timeout,
             transport=transport,
+            verify=ollama_tls_verify(settings),
             headers={"User-Agent": settings.user_agent, "Accept": "application/json"},
         )
 

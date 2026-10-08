@@ -682,6 +682,19 @@ def cmd_setup(args: argparse.Namespace, settings: Settings) -> int:
     finally:
         broker.close()
 
+    if settings.database_url:
+        from .sqlstore import SqlRecordStore
+
+        sql = SqlRecordStore.from_settings(settings)
+        try:
+            sql.ensure_schema()
+            rows.append(("SQL veritabanı", "OK", f"{redact_url(settings.database_url)}: tablolar hazır"))
+        except Exception as exc:
+            failed = True
+            rows.append(("SQL veritabanı", "HATA", f"{redact_url(settings.database_url)}: {describe_exc(exc)}"))
+        finally:
+            sql.close()
+
     try:
         make_store(settings).ensure_indices()
         rows.append(
@@ -977,6 +990,30 @@ def cmd_rescore(args: argparse.Namespace, settings: Settings) -> int:
     print(
         f"Yeniden skorlama{' (dry-run)' if stats.dry_run else ''}: seçilen={stats.selected} "
         f"yayınlanan={stats.published} atlanan={stats.skipped} → {Queue.ARTICLES_KEYWORD}"
+    )
+    return 0
+
+
+def cmd_reindex(args: argparse.Namespace, settings: Settings) -> int:
+    """Elasticsearch arama indeksini SQL veritabanındaki kayıtlardan baştan kurar."""
+    from .sqlstore import SqlRecordStore, reindex_from_sql
+    from .store import ElasticsearchStore
+
+    if not settings.database_url:
+        log.error("DATABASE_URL boş: yeniden kurulacak SQL kaydı yok")
+        return 1
+    sql = SqlRecordStore.from_settings(settings)
+    try:
+        sql.ensure_schema()
+        done = reindex_from_sql(sql, ElasticsearchStore(settings), batch_size=args.batch_size)
+    except Exception as exc:
+        log.error("Yeniden indeksleme başarısız: %s", describe_exc(exc))
+        return 1
+    finally:
+        sql.close()
+    print(
+        f"Arama indeksi SQL'den kuruldu: haber={done['articles']} alarm={done['alarms']} "
+        f"rapor={done['reports']} geri bildirim={done['feedback']}"
     )
     return 0
 
@@ -1446,6 +1483,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="en çok N kayıt")
     p.add_argument("--dry-run", action="store_true", help="yayınlamadan say")
     p.set_defaults(func=cmd_rescore)
+
+    p = sub.add_parser("reindex", help="Elasticsearch arama indeksini SQL veritabanındaki kayıtlardan baştan kur")
+    p.add_argument("--batch-size", type=int, default=500, help="SQL'den bir seferde okunacak satır (varsayılan 500)")
+    p.set_defaults(func=cmd_reindex)
 
     p = sub.add_parser("replay-dead-letters", help="q.dead_letter mesajlarını köken kuyruklarına geri oynat")
     p.add_argument("--limit", type=int, help="en çok N mesaj")

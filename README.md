@@ -441,6 +441,24 @@ analizörüyle indekslenir: `standard` tokenizer + `apostrophe` + Türkçe `lowe
 `stemmer`. Böylece "Kılıçdaroğlu'nun" sorgusu "Kılıçdaroğlu" ile eşleşir. Yazma işlemleri `id` ile upsert'tür;
 aynı haber ikinci kez işlenirse belge üzerine yazılır (yinelenme olmaz).
 
+### SQL asıl kayıt, Elasticsearch arama indeksi
+
+Elasticsearch bir veritabanı değil arama motorudur. `DATABASE_URL` ayarlıysa (Docker Compose'da varsayılan olarak
+açık, PostgreSQL 16) her haber, alarm, rapor ve geri bildirim **önce SQL'e** (asıl kayıt), sonra Elasticsearch'e
+yazılır. **Tüm arama işlemleri** (haber arama, soru-cevap, alarm/rapor listeleri, istatistik, benzer alarm, kNN)
+Elasticsearch'ten yapılır; SQL yalnızca kimlikle okuma ve indeksi baştan kurmak için okunur.
+
+| Tablo | Anahtar | İçerik |
+|-------|---------|--------|
+| `news_articles` | `id` | ES belgesi (`doc`, JSONB) + kaynak, tarih, skor, alarm sütunları + `embedding` |
+| `news_alarms` | `alarm_id` | Alarm belgesi, haber kimliği, skor |
+| `news_reports` | `report_id` | Rapor belgesi, tür, tarih |
+| `news_feedback` | `feedback_id` | Geri bildirim, alarm kimliği, etiket |
+
+Elasticsearch silinirse, eşleme değişirse ya da yeni kümeye geçilirse: `scraperhryt reindex` indeksleri SQL'den
+yeniden kurar (vektörler de SQL'de saklandığından yeniden embedding gerekmez). `DATABASE_URL` boşsa yalnızca
+Elasticsearch kullanılır.
+
 ---
 
 ## 11. Raporlama katmanı (özet)
@@ -531,6 +549,13 @@ istemcisi, skorlama), `tests/test_store.py`, `tests/test_alarm.py`, `tests/test_
 ---
 
 ## 14. Sorun giderme
+
+**Uzak / iç ağ Ollama sunucusu.** `.env` dosyasında `OLLAMA_BASE_URL` sunucunun adresi (yol altında yayınlanıyorsa
+`https://sunucu/llm` gibi), `OLLAMA_MODEL` model adı, gerekirse `OLLAMA_NUM_CTX`. Sunucunun sertifikası kendi
+imzalıysa önce sertifika dosyasını `OLLAMA_CA_BUNDLE=/yol/sunucu.pem` ile verin; olmuyorsa `OLLAMA_VERIFY_TLS=false`
+doğrulamayı kapatır. Bu durumda `docker compose --profile ollama` gerekmez. Sunucu adresini ve modeli depoya değil
+yalnızca `.env`'e yazın (`.env` git'e girmez).
+
 
 | Belirti | Neden / ne olur | Ne yapmalı |
 |---------|-----------------|------------|
