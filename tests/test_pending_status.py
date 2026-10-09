@@ -144,7 +144,7 @@ def test_ask_ui_shows_elapsed_time_and_aborts_after_server_limits() -> None:
     s = s.model_copy(update={"rag_query_rewrite": True})
     page = TestClient(create_app(s, InMemoryStore(), FakeOllama())).get("/").text
     assert "const ASK_LIMIT_MS = 170000;" in page  # 20 + 90 + 60 sn pay
-    assert "signal: ctrl.signal" in page and "Yanıt hazırlanıyor…" in page and "AbortError" in page
+    assert "signal: ctrl.signal" in page and "typewriter(" in page and "AbortError" in page
 
 
 def test_runner_skips_articles_older_than_max_age(tmp_path: Path) -> None:

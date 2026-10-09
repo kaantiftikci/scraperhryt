@@ -49,6 +49,10 @@
     .progress[data-mode="waiting"] .progress-fill { background: var(--muted); opacity: .45; }
     .progress[data-mode="indeterminate"] .progress-fill { width: 30%; animation: slide 1.4s ease-in-out infinite; }
     @keyframes slide { 0% { left: -30%; } 100% { left: 100%; } }
+    /* canlı yenilemede yeni gelen kart kısa süre vurgulanır */
+    .card.fresh { animation: fresh 6s ease-out; }
+    @keyframes fresh { 0%, 40% { box-shadow: 0 0 0 2px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+    @media (prefers-reduced-motion: reduce) { .card.fresh { animation: none; box-shadow: 0 0 0 2px var(--accent); } }
     @media (prefers-reduced-motion: reduce) {
       .progress[data-mode="indeterminate"] .progress-fill { animation: none; width: 100%; opacity: .5; }
       .progress-fill { transition: none; }
@@ -105,6 +109,15 @@
     /* soru cevabı ve raporlar: tam genişlik */
     .block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
     .answer { white-space: pre-wrap; max-width: 75ch; margin: 0; }
+    /* cevap yazılırken: bekleme noktaları ve yanıp sönen imleç */
+    .dots { display: inline-flex; gap: 5px; padding: 6px 0; }
+    .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: dot 1.2s infinite ease-in-out; }
+    .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
+    @keyframes dot { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+    .caret { display: inline-block; width: 2px; height: 1.1em; margin-left: 1px; vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .dots[hidden], .caret[hidden] { display: none; }
+    @media (prefers-reduced-motion: reduce) { .dots i, .caret { animation: none; } }
     details.sources > summary { cursor: pointer; color: var(--accent); }
     ol.timeline, ol.srcs { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
     .tdate { font: 12px var(--font-data); color: var(--muted); margin-right: 6px; }
@@ -253,6 +266,7 @@
 
   /* kazıyıcı durumu + ilerleme çubuğu */
   let statusTimer = null;
+  let wasRunning = false;
   function setProgress(mode, pct, label) {
     const bar = $("progress");
     bar.dataset.mode = mode;
@@ -268,6 +282,8 @@
       const s = await r.json();
       const last = s.last_run;
       const running = Boolean(s.running && s.progress);
+      if (wasRunning && !running) refreshLive();
+      wasRunning = running;
       let row;
       let warning = s.warning || "";
       if (running) row = "<span><strong>Tarama sürüyor</strong></span>";
@@ -316,47 +332,72 @@
   }
 
   /* haber listesi */
-  function renderArticle(doc) {
+  function renderArticle(doc, fresh) {
     const text = (doc.subtitle || "").trim() || (doc.snippet || "").trim();
     const score = Number(doc.alarm_score || 0);
-    return `<article class="card${doc.is_alarm ? " alarm" : ""}">
+    return `<article class="card${doc.is_alarm ? " alarm" : ""}${fresh ? " fresh" : ""}">
       <div class="meta"><span class="when">${esc(doc.source)} · ${fmtDate(doc.published_at)}</span>${doc.is_alarm ? `<span class="badge ${scoreClass(score)}">alarm ${score}</span>` : ""}</div>
       <h3><a href="${safeUrl(doc.content_url)}" target="_blank" rel="noopener">${esc(doc.title)}</a></h3>
       ${text ? `<p class="text">${esc(text)}</p>` : ""}
       <div class="foot">${chips(doc.matched_keywords)}</div>
     </article>`;
   }
-  async function search(ev) {
+  /* canlı yenileme: liste değişmediyse yeniden çizilmez; yeni gelen kartlar vurgulanır */
+  const keyOf = (d) => d.id || d.content_url || d.title;
+  const signature = (items) => items.map((d) => `${keyOf(d)}:${d.alarm_score ?? ""}`).join("|");
+  let newsShown = null;
+  async function search(ev, silent) {
     if (ev) ev.preventDefault();
     const p = new URLSearchParams({ q: "", size: 30, only_alarms: $("only-alarms").value });
     if ($("source").value) p.set("sources", $("source").value);
     if ($("since").value) p.set("since_days", $("since").value);
-    $("search-note").textContent = "Yükleniyor…";
+    if (!silent) { $("search-note").textContent = "Yükleniyor…"; newsShown = null; }
     try {
       const r = await fetch("/articles/search?" + p.toString());
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const stamp = (d) => { const t = Date.parse(d.published_at || ""); return isNaN(t) ? 0 : t; };
       const items = ((await r.json()).results || []).slice().sort((a, b) => stamp(b) - stamp(a));
-      $("search-note").textContent = `${items.length} en yeni haber`;
-      $("results").innerHTML = items.length ? items.map(renderArticle).join("") : `<p class="empty">Bu filtrelerle haber yok. Süreyi genişletmeyi deneyin.</p>`;
-    } catch (e) { $("search-note").textContent = "Haberler yüklenemedi: " + e.message; }
+      const sig = signature(items);
+      if (silent && newsShown && newsShown.sig === sig) return;
+      const before = newsShown ? newsShown.keys : null;
+      const fresh = before ? items.filter((d) => !before.has(keyOf(d))).length : 0;
+      newsShown = { sig, keys: new Set(items.map(keyOf)) };
+      $("search-note").textContent = `${items.length} haber` + (fresh ? ` · ${fresh} yeni haber eklendi` : "");
+      $("results").innerHTML = items.length ? items.map((d) => renderArticle(d, before && !before.has(keyOf(d)))).join("") : `<p class="empty">Bu filtrelerle haber yok. Süreyi genişletmeyi deneyin.</p>`;
+    } catch (e) { if (!silent) $("search-note").textContent = "Haberler yüklenemedi: " + e.message; }
   }
   /* filtreler değişince liste kendiliğinden yenilenir */
   $("filter-form").addEventListener("submit", search);
   ["source", "since", "only-alarms"].forEach((id) => $(id).addEventListener("change", () => search()));
 
   /* soru */
+  /* daktilo efekti: gelen metin harf harf yazılır; geride kalırsa hızlanır */
+  function typewriter(el) {
+    let target = "", shown = 0, timer = null, waiters = [];
+    const step = () => {
+      const backlog = target.length - shown;
+      if (backlog <= 0) { timer = null; waiters.splice(0).forEach((f) => f()); return; }
+      shown += Math.max(1, Math.ceil(backlog / 40));
+      el.textContent = target.slice(0, shown);
+      timer = setTimeout(step, 20);
+    };
+    return {
+      push(text) { target += text; if (!timer) step(); },
+      done() { return new Promise((res) => { if (!timer && shown >= target.length) res(); else waiters.push(res); }); },
+    };
+  }
   async function ask(ev) {
     ev.preventDefault();
     const question = $("question").value.trim();
     if (!question) return;
     $("ask-btn").disabled = true;
-    $("ask-result").innerHTML = "";
-    /* Ollama skorlayıcıyla paylaşıldığından yanıt sürebilir: geçen süre gösterilir, sunucu sınırı aşılınca istek kesilir. */
+    $("ask-note").textContent = "";
+    $("ask-result").innerHTML = `<article class="block"><p class="answer"><span id="answer-text"></span><span class="dots" id="answer-wait" aria-label="Yanıt hazırlanıyor"><i></i><i></i><i></i></span><span class="caret" id="answer-caret" hidden></span></p></article>`;
+    const tw = typewriter($("answer-text"));
+    let typing = false;
+    const startTyping = () => { if (!typing) { typing = true; $("answer-wait").hidden = true; $("answer-caret").hidden = false; } };
+    /* Ollama skorlayıcıyla paylaşıldığından yanıt sürebilir: sunucu sınırı aşılınca istek kesilir. */
     const started = Date.now();
-    const tick = () => { $("ask-note").textContent = `Yanıt hazırlanıyor… ${Math.round((Date.now() - started) / 1000)} sn. Model aynı anda yeni haberleri de skorluyorsa ${Math.round(ASK_LIMIT_MS / 60000)} dk'ya kadar sürebilir.`; };
-    tick();
-    const ticker = setInterval(tick, 1000);
     const ctrl = new AbortController();
     const limit = setTimeout(() => ctrl.abort(), ASK_LIMIT_MS);
     try {
@@ -367,11 +408,8 @@
       const decoder = new TextDecoder();
       let buffer = "", streamed = "", answer = null;
       const onEvent = (ev) => {
-        if (ev.type === "token") {
-          if (!streamed) { clearInterval(ticker); $("ask-note").textContent = "Yanıt yazılıyor…"; }
-          streamed += ev.text;
-          $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(streamed)}</p></article>`;
-        } else if (ev.type === "answer") answer = ev.answer;
+        if (ev.type === "token") { startTyping(); streamed += ev.text; tw.push(ev.text); }
+        else if (ev.type === "answer") answer = ev.answer;
         else if (ev.type === "error") throw new Error(ev.detail || "akış hatası");
       };
       for (;;) {
@@ -386,23 +424,24 @@
         if (done) break;
       }
       if (!answer) throw new Error("yanıt tamamlanmadı");
+      /* model akış vermediyse (yedek cevap) son cevap da aynı efektle yazılır */
+      if (!streamed) { startTyping(); tw.push(answer.answer); }
+      await tw.done();
       const secs = Math.round((Date.now() - started) / 1000);
-      let note = `${answer.retrieved_count} haber · model ${answer.model} · ${secs} sn`;
-      if (!answer.retrieved_count) note = "Bu süre içinde soruyla eşleşen haber bulunamadı.";
-      else if (answer.model === "fallback") note = `${answer.retrieved_count} haber · ${secs} sn · model yanıt vermediği için cevap haberlerin metninden doğrudan derlendi`;
+      const note = answer.retrieved_count ? `${answer.retrieved_count} haber · ${secs} sn` : "Bu süre içinde soruyla eşleşen haber bulunamadı.";
       $("ask-note").textContent = note;
       const timeline = (answer.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${esc(t.citation)}] ` : ""}${esc(t.event)}</li>`).join("");
       const sources = (answer.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${safeUrl(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
       $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(answer.answer)}</p>` +
         (sources ? `<details class="sources"><summary>Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
-          (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi · yeniden eskiye</h2><ol class="timeline">${timeline}</ol>` : "") +
+          (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi</h2><ol class="timeline">${timeline}</ol>` : "") +
           `<h2 class="small" style="margin-top:10px">Kaynaklar</h2><ol class="srcs">${sources}</ol></details>` : "") + `</article>`;
     } catch (e) {
+      $("ask-result").innerHTML = "";
       $("ask-note").textContent = e.name === "AbortError"
         ? `Yanıt ${Math.round(ASK_LIMIT_MS / 1000)} sn içinde gelmedi; model meşgul olabilir. Biraz sonra yeniden deneyin.`
         : "Soru yanıtlanamadı: " + e.message;
     } finally {
-      clearInterval(ticker);
       clearTimeout(limit);
       $("ask-btn").disabled = false;
     }
@@ -410,27 +449,33 @@
   $("ask-form").addEventListener("submit", ask);
 
   /* alarmlar */
-  function renderAlarm(a) {
+  function renderAlarm(a, fresh) {
     const score = Number(a.alarm_score || 0);
-    return `<article class="card alarm">
+    return `<article class="card alarm${fresh ? " fresh" : ""}">
       <div class="meta"><span class="when">${esc(a.source)} · ${fmtDate(a.published_at)}</span><span class="badge ${scoreClass(score)}">skor ${score}</span></div>
       <h3><a href="${safeUrl(a.content_url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
       ${a.alarm_reason ? `<div class="reason"><p>${esc(a.alarm_reason)}</p></div>` : ""}
       <div class="foot">${chips(a.matched_keywords)}${a.needs_review ? `<span class="chip review">inceleme</span>` : ""}${a.duplicate_of ? `<span class="chip">tekrar</span>` : ""}</div>
     </article>`;
   }
-  async function loadAlarms(ev) {
+  let alarmsShown = null;
+  async function loadAlarms(ev, silent) {
     if (ev) ev.preventDefault();
     const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 99, include_duplicates: $("alarm-dups").value });
     if (activeKeyword) p.set("keyword", activeKeyword);
-    $("alarm-note").textContent = "Yükleniyor…";
+    if (!silent) { $("alarm-note").textContent = "Yükleniyor…"; alarmsShown = null; }
     try {
       const r = await fetch("/alarms?" + p.toString());
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       const data = await r.json();
+      const sig = signature(data.items);
+      if (silent && alarmsShown && alarmsShown.sig === sig) return;
+      const before = alarmsShown ? alarmsShown.keys : null;
+      alarmsShown = { sig, keys: new Set(data.items.map(keyOf)) };
       $("alarm-note").textContent = activeKeyword ? `"${activeKeyword}" kelimesiyle yakalanan ${data.count} alarm` : `${data.count} alarm`;
-      $("alarms").innerHTML = data.items.length ? data.items.map(renderAlarm).join("") : `<p class="empty">${activeKeyword ? "Bu kelimeyle bu aralıkta alarm yok." : "Bu aralıkta alarm yok."}</p>`;
-    } catch (e) { $("alarm-note").textContent = "Alarmlar yüklenemedi: " + e.message; }
+      if (!activeKeyword) $("tab-alarms").querySelector(".count").textContent = data.count;
+      $("alarms").innerHTML = data.items.length ? data.items.map((a) => renderAlarm(a, before && !before.has(keyOf(a)))).join("") : `<p class="empty">${activeKeyword ? "Bu kelimeyle bu aralıkta alarm yok." : "Bu aralıkta alarm yok."}</p>`;
+    } catch (e) { if (!silent) $("alarm-note").textContent = "Alarmlar yüklenemedi: " + e.message; }
   }
   $("alarm-form").addEventListener("submit", loadAlarms);
   /* anahtar kelimeye tıklayınca yalnızca o kelimeyle yakalanan alarmlar; tekrar tıklayınca hepsi */
@@ -441,8 +486,19 @@
     loadAlarms();
   }));
 
+  /* yeni haber ve alarmlar sayfa yenilenmeden gelir: 20 sn'de bir ve her tarama bittiğinde kontrol edilir */
+  const LIVE_MS = 20000;
+  function refreshLive() {
+    if (document.hidden) return;
+    search(null, true);
+    loadAlarms(null, true);
+  }
+  setInterval(refreshLive, LIVE_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshLive(); });
+
   loadStatus();
   search();
+  loadAlarms(null, true);
 })();
 </script>
 </body>

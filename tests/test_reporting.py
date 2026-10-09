@@ -1062,8 +1062,8 @@ def test_api_dashboard_renders_html(client) -> None:
     assert records["alarm_high"].title in html and records["alarm_high"].content_url in html
     assert "badge critical" in html and "badge important" in html
     assert "adhoc" in html or "İsteğe bağlı rapor" in html
-    # Eşleşme yokken pano "dil modeli kullanılamadı" demez; o ileti yalnızca gerçek LLM yedeğine (fallback) aittir.
-    assert "eşleşen haber bulunamadı" in html and 'answer.model === "fallback"' in html
+    # Cevap notunda yalnızca haber sayısı ve süre yer alır; model adı gösterilmez.
+    assert "eşleşen haber bulunamadı" in html and "answer.model" not in html
     assert score_class(85) == "critical" and score_class(60) == "important" and score_class(30) == "notable" and score_class("x") == "routine"
 
 
