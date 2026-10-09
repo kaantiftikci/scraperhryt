@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     # ---- Raporlama / API ----
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    rabbitmq_ui_url: str = "http://localhost:15672"  # arayüzün sağ üstündeki RabbitMQ bağlantısı; boşsa gizlenir
     report_interval_minutes: int = 60
     report_window_hours: int = 24
     report_digest_every: int = 10      # q.alarms'tan bu kadar alarm birikince alarm özeti raporu üret

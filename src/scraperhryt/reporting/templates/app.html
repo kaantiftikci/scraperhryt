@@ -34,6 +34,7 @@
     header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-block: 20px 0; }
     header.top h1 { font: 600 26px/1.2 var(--font-display); margin: 0; }
     header.top a { font-size: 14px; text-decoration: none; }
+    header.top .links { display: flex; gap: 16px; }
     h2.small { font: 500 12px var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0; }
 
     /* durum şeridi + ilerleme çubuğu */
@@ -155,7 +156,7 @@
 <div class="wrap">
   <header class="top">
     <h1>Haber Radarı</h1>
-    <a href="/docs">API</a>
+    <nav class="links"><a href="/docs">API</a>{% if settings.rabbitmq_ui_url %}<a href="{{ settings.rabbitmq_ui_url }}" target="_blank" rel="noopener">RabbitMQ</a>{% endif %}</nav>
   </header>
 
   <section class="status" id="status" data-level="ok" aria-live="polite">

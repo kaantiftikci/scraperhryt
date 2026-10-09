@@ -131,7 +131,7 @@ class AskRequest(BaseModel):
 class GenerateReportRequest(BaseModel):
     kind: ReportKind = "adhoc"
     hours: int | None = Field(default=None, ge=1, le=MAX_WINDOW_HOURS, description="Varsayılan REPORT_WINDOW_HOURS")
-    window_end: datetime | None = Field(default=None, description="Pencere sonu (varsayılan: şimdi)")
+    window_end: datetime | None = Field(default=None, description="Pencere sonu, boşsa şimdi")
     narrative: bool = Field(default=True, description="False ise LLM çağrılmaz, şablon anlatı üretilir")
 
 
@@ -139,7 +139,7 @@ class GeneratedReport(Report):
     """``POST /reports/generate`` yanıtı: rapor (her durumda ``news-reports``'a yazılmıştır) + yayın durumu."""
 
     published: bool = Field(
-        default=False, description="report.generated ile kuyruğa yayınlandı mı (False: broker yok/erişilemedi)"
+        default=False, description="Kuyruğa yayınlandı mı"
     )
 
 
@@ -342,12 +342,8 @@ def generate_report(
 
 def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker | None = None) -> FastAPI:
     app = FastAPI(
-        title="scraperhryt API",
+        title="Haber Radarı API",
         version=__version__,
-        description=(
-            "Hürriyet Gündem + 12punto haber izleme boru hattı: arama, alarmlar, raporlar, istatistik ve "
-            "RAG soru-cevap. Pano için `/` adresine gidin."
-        ),
     )
     builder = ReportBuilder(settings, store, llm)
     qa = QAEngine(settings, store, llm)
@@ -368,7 +364,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
     templates.env.filters["kind_label"] = kind_label
 
     # --- sağlık ---
-    @app.get("/health", response_model=HealthResponse, summary="Depo ve LLM sağlık özeti")
+    @app.get("/health", response_model=HealthResponse, summary="Sağlık durumu")
     def health() -> HealthResponse | JSONResponse:
         store_ok = _safe_bool(store.health, "depo sağlık kontrolü")
         llm_ok, model_ok = llm_probe.probe()
@@ -394,7 +390,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         return body
 
     # --- haberler ---
-    @app.get("/articles/search", response_model=SearchResponse, summary="Türkçe BM25 + yenilik ağırlıklı arama")
+    @app.get("/articles/search", response_model=SearchResponse, summary="Haber ara")
     def search_articles(
         q: Annotated[str, Query(max_length=500, description="Arama metni; boşsa yalnızca yeniliğe göre sıralanır")] = "",
         since_days: Annotated[int | None, Query(ge=1, le=MAX_SINCE_DAYS, description="Son N gün")] = None,
@@ -413,7 +409,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         results = [hit_to_article(hit) for hit in hits]
         return SearchResponse(query=q, since_days=since_days, count=len(results), results=results)
 
-    @app.get("/articles/{article_id}", summary="Tek haber (news-articles belgesi)")
+    @app.get("/articles/{article_id}", summary="Tek haber")
     def get_article(article_id: Annotated[str, PathParam(min_length=1, max_length=128)]) -> dict[str, Any]:
         doc = guarded("haber okuma", lambda: store.get_record(article_id))
         if doc is None:
@@ -421,13 +417,13 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         return doc
 
     # --- alarmlar ---
-    @app.get("/alarms", response_model=AlarmsResponse, summary="Son alarmlar (news-alarms)")
+    @app.get("/alarms", response_model=AlarmsResponse, summary="Alarmlar")
     def list_alarms(
         since_hours: Annotated[int | None, Query(ge=1, le=MAX_WINDOW_HOURS, description="Son N saat")] = None,
         min_score: Annotated[int | None, Query(ge=0, le=100)] = None,
         size: Annotated[int, Query(ge=1, le=200)] = 20,
         include_content: Annotated[bool, Query(description="Haber gövdesini de döndür")] = False,
-        include_duplicates: Annotated[bool, Query(description="Tekrar (duplicate_of dolu) alarmları da listele")] = False,
+        include_duplicates: Annotated[bool, Query(description="Tekrar alarmları da listele")] = False,
         needs_review: Annotated[bool | None, Query(description="Yalnızca insan incelemesi önerilenler")] = None,
         event_id: Annotated[str | None, Query(description="Belirli bir olay kümesi")] = None,
         keyword: Annotated[str | None, Query(description="Yalnızca bu anahtar kelimeyle yakalanan alarmlar")] = None,
@@ -458,7 +454,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         return AlarmsResponse(count=len(items), items=items)
 
     # --- raporlar ---
-    @app.get("/reports", response_model=ReportsResponse, summary="Son raporlar (news-reports)")
+    @app.get("/reports", response_model=ReportsResponse, summary="Raporlar")
     def list_reports(
         kind: Annotated[str | None, Query(max_length=40, description="periodic | alarm_digest | adhoc")] = None,
         size: Annotated[int, Query(ge=1, le=100)] = 10,
@@ -466,7 +462,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         docs = guarded("rapor listesi", lambda: store.list_reports(kind=kind or None, size=size))
         return ReportsResponse(count=len(docs), items=[dict(doc) for doc in docs])
 
-    @app.post("/reports/generate", response_model=GeneratedReport, summary="Anında rapor üret, kaydet ve yayınla")
+    @app.post("/reports/generate", response_model=GeneratedReport, summary="Rapor üret")
     def generate(payload: GenerateReportRequest) -> GeneratedReport:
         return guarded(
             "rapor üretme",
@@ -482,21 +478,21 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         )
 
     # --- istatistik ---
-    @app.get("/stats", summary="Pencere istatistikleri (toplam, alarm, dağılımlar, saatlik seri, en yüksek alarmlar)")
+    @app.get("/stats", summary="İstatistikler")
     def stats(hours: Annotated[int, Query(ge=1, le=MAX_WINDOW_HOURS)] = DASHBOARD_HOURS) -> dict[str, Any]:
         now = utcnow()
         data = guarded("istatistik", lambda: store.stats(now - timedelta(hours=hours), now))
         return {"hours": hours, **dict(data)}
 
     # --- soru-cevap ---
-    @app.post("/ask", response_model=Answer, summary="RAG soru-cevap: en yeni haberlerden atıflı Türkçe yanıt")
+    @app.post("/ask", response_model=Answer, summary="Soru sor")
     def ask(payload: AskRequest) -> Answer:
         return guarded(
             "soru-cevap",
             lambda: qa.ask(payload.question, since_days=payload.since_days, top_k=payload.top_k, sources=payload.sources),
         )
 
-    @app.post("/ask/stream", summary="RAG soru-cevap, akış hâlinde (NDJSON: sources → token… → answer)")
+    @app.post("/ask/stream", summary="Soru sor, cevap akışlı")
     def ask_stream(payload: AskRequest) -> StreamingResponse:
         prepared = guarded(
             "soru-cevap",
@@ -514,7 +510,7 @@ def create_app(settings: Settings, store: ArticleStore, llm: LLM, broker: Broker
         return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # --- pano ---
-    @app.get("/scraper/status", summary="Kazıyıcı durumu: son/sonraki tur, çekilemeyen (bekleyen) haberler, uyarı")
+    @app.get("/scraper/status", summary="Tarama durumu")
     def scraper_status_endpoint() -> dict[str, Any]:
         from ..scrapers.status import scraper_status
 
