@@ -301,8 +301,7 @@
       } else if (s.next_run_at && last) {
         const total = (s.interval_seconds || 300) * 1000;
         const left = Math.max(0, new Date(s.next_run_at) - Date.now());
-        const every = Math.round(total / 60000);
-        setProgress("waiting", 100 - (left / total) * 100, left > 0 ? `Sonraki taramaya ${Math.ceil(left / 60000)} dk (her ${every} dk)` : "Sonraki tarama başlamak üzere");
+        setProgress("waiting", 100 - (left / total) * 100, left > 0 ? `Sonraki taramaya ${Math.ceil(left / 60000)} dk` : "Sonraki tarama başlamak üzere");
         next = 15000;
       } else if (last) {
         setProgress("waiting", 0, "");  /* zamanlayıcısız tek tur: gösterilecek ilerleme yok */
