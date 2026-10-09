@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scraperhryt"
+version = "0.1.0"
+description = "Hürriyet Gündem + 12punto haber toplama, anahtar kelime filtreleme, Ollama LLM alarm skorlama, RabbitMQ/Elasticsearch, raporlama ve RAG soru-cevap boru hattı"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "feedparser>=6.0",
+    "pika>=1.3",
+    "elasticsearch>=8.10,<9",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "httpx>=0.27",
+    "python-dateutil>=2.8",
+    "tenacity>=8.2",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+scraperhryt = "scraperhryt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scraperhryt = ["reporting/templates/*.html", "reporting/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "live: tests that hit the real news sites over the network (deselect with -m 'not live')",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

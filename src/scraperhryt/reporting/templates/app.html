@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Haber Radarı</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    /* Tek sayfa: durum şeridi (canlı ilerleme), ardından Ara / Soru sor / Alarmlar / Raporlar. Haberler satırda üç kare kart. */
+    :root {
+      --bg: #f3f5f7; --card: #ffffff; --ink: #172028; --muted: #5b6670; --line: #d9dee3; --track: #e6eaee;
+      --accent: #0e7c86; --accent-ink: #ffffff;
+      --critical: #b42318; --important: #b54708; --notable: #8a6d00; --ok: #1a7f4b; --mark: #ffe58a;
+      --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --font-display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+      --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+      --bg: #0f1418; --card: #161c22; --ink: #e6ebef; --muted: #9aa7b2; --line: #2a333c; --track: #222a32;
+      --accent: #4fc1cc; --accent-ink: #0b1b1e;
+      --critical: #ff7a6e; --important: #f2a65a; --notable: #e3c35a; --ok: #5ccf8a; --mark: #6b5a12; color-scheme: dark;
+    } }
+    :root[data-theme="dark"] {
+      --bg: #0f1418; --card: #161c22; --ink: #e6ebef; --muted: #9aa7b2; --line: #2a333c; --track: #222a32;
+      --accent: #4fc1cc; --accent-ink: #0b1b1e;
+      --critical: #ff7a6e; --important: #f2a65a; --notable: #e3c35a; --ok: #5ccf8a; --mark: #6b5a12; color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); padding-block: 0 48px; padding-inline: 16px; }
+    a { color: var(--accent); }
+    .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+    header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-block: 20px 0; }
+    header.top h1 { font: 600 26px/1.2 var(--font-display); margin: 0; }
+    header.top a { font-size: 14px; text-decoration: none; }
+    header.top .links { display: flex; gap: 16px; }
+    h2.small { font: 500 12px var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0; }
+
+    /* durum şeridi + ilerleme çubuğu */
+    .status { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--ok); background: var(--card); border-radius: 8px; font-size: 14px; }
+    .status[data-level="warn"] { border-left-color: var(--important); }
+    .status[data-level="alarm"] { border-left-color: var(--critical); }
+    .status[data-level="running"] { border-left-color: var(--accent); }
+    .status-head { display: flex; gap: 4px 16px; justify-content: space-between; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+    .status .row { display: flex; gap: 4px 14px; flex-wrap: wrap; color: var(--muted); }
+    .status .row strong { color: var(--ink); font-weight: 500; }
+    .progress { position: relative; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+    .progress-fill { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--accent); border-radius: 3px; transition: width .6s ease; }
+    .progress[data-mode="waiting"] .progress-fill { background: var(--muted); opacity: .45; }
+    .progress[data-mode="indeterminate"] .progress-fill { width: 30%; animation: slide 1.4s ease-in-out infinite; }
+    @keyframes slide { 0% { left: -30%; } 100% { left: 100%; } }
+    /* canlı yenilemede yeni gelen kart kısa süre vurgulanır */
+    .card.fresh { animation: fresh 6s ease-out; }
+    @keyframes fresh { 0%, 40% { box-shadow: 0 0 0 2px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+    @media (prefers-reduced-motion: reduce) { .card.fresh { animation: none; box-shadow: 0 0 0 2px var(--accent); } }
+    @media (prefers-reduced-motion: reduce) {
+      .progress[data-mode="indeterminate"] .progress-fill { animation: none; width: 100%; opacity: .5; }
+      .progress-fill { transition: none; }
+    }
+    .progress-label { font: 12px var(--font-data); color: var(--muted); }
+    .status .msg { color: var(--ink); margin: 0; }
+    .status details summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+    .status ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+    .status ul a { color: var(--ink); text-decoration: none; }
+    .empty { color: var(--muted); font-size: 14px; margin: 0; }
+    .error { padding: 10px 14px; border: 1px solid var(--critical); border-radius: 8px; color: var(--critical); background: var(--card); margin: 0; }
+
+    /* sekmeler ve formlar */
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+    .tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 10px 14px; font: 500 15px var(--font-body); color: var(--muted); cursor: pointer; white-space: nowrap; }
+    .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+    .tabs .count { font: 12px var(--font-data); color: var(--muted); margin-left: 4px; }
+    .tabs button:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .panel { display: grid; gap: 12px; }
+    .panel[hidden] { display: none; }
+    form.bar { display: grid; gap: 10px; }
+    .field { display: grid; gap: 4px; min-width: 0; }
+    label { font-size: 12px; color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase; }
+    input, select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); font: inherit; min-width: 0; height: 44px; }
+    .main-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+    button.primary { padding: 10px 20px; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; cursor: pointer; font: 600 15px var(--font-body); }
+    button.primary:disabled { opacity: .6; cursor: progress; }
+    details.filters summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+    .filters-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; align-items: end; }
+    .note { color: var(--muted); font-size: 14px; min-height: 1.4em; margin: 0; font-variant-numeric: tabular-nums; }
+
+    /* haber kartları: satırda üç; başlık 2, önizleme 3 satır sabit */
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .grid > .empty { grid-column: 1 / -1; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .card.alarm { border-top: 3px solid var(--critical); }
+    .card .meta { display: flex; gap: 8px; justify-content: space-between; align-items: center; font: 12px var(--font-data); color: var(--muted); }
+    .card .meta .when { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card h3 { margin: 0; font: 600 17px/1.35 var(--font-body); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-height: 2.7em; }
+    .card h3 a { color: var(--ink); text-decoration: none; }
+    .card h3 a:hover { text-decoration: underline; }
+    .card .text { margin: 0; font-size: 14px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: 4.5em; }
+    .card .reason { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--critical) 7%, transparent); font-size: 14px; }
+    .card .reason p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: 4.5em; }
+    .card .foot { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .badge, .chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font: 500 12px var(--font-data); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+    .badge.critical { color: var(--critical); border-color: var(--critical); }
+    .badge.important { color: var(--important); border-color: var(--important); }
+    .badge.notable { color: var(--notable); border-color: var(--notable); }
+    .badge.routine { color: var(--ok); border-color: var(--ok); }
+    .chip.kw { color: var(--accent); border-color: var(--accent); }
+    .chip.review { color: var(--important); border-color: var(--important); }
+    
+    /* soru cevabı ve raporlar: tam genişlik */
+    .block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
+    .answer { white-space: pre-wrap; max-width: 75ch; margin: 0; }
+    /* cevap yazılırken: bekleme noktaları ve yanıp sönen imleç */
+    .dots { display: inline-flex; gap: 5px; padding: 6px 0; }
+    .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: dot 1.2s infinite ease-in-out; }
+    .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
+    @keyframes dot { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+    .caret { display: inline-block; width: 2px; height: 1.1em; margin-left: 1px; vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .dots[hidden], .caret[hidden] { display: none; }
+    @media (prefers-reduced-motion: reduce) { .dots i, .caret { animation: none; } }
+    details.sources > summary { cursor: pointer; color: var(--accent); }
+    ol.timeline, ol.srcs { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
+    .tdate { font: 12px var(--font-data); color: var(--muted); margin-right: 6px; }
+    .block .meta { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; font: 13px var(--font-data); color: var(--muted); }
+    form.ask { display: grid; gap: 8px; width: 100%; max-width: 760px; margin: 8px auto 4px; padding: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+    form.ask label { font-size: 13px; }
+    form.ask input { height: 48px; font-size: 16px; }
+    form.ask .note { font-size: 13px; }
+    #ask-result:empty, #ask-note:empty { display: none; }
+    .kw-list { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; color: var(--muted); }
+    .kw-list > span:first-child { margin-right: 4px; }
+    .kw-list button.chip { background: none; cursor: pointer; font: 500 12px var(--font-data); }
+    .kw-list button.chip:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .kw-list button.chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+    .reports { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+    .reports > .empty { grid-column: 1 / -1; }
+    .report { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .report-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    .report-head h3 { margin: 0; font: 600 16px/1.3 var(--font-body); }
+    .report-stats { font: 12px var(--font-data); color: var(--muted); white-space: nowrap; }
+    .report-when { font: 12px var(--font-data); color: var(--muted); }
+    .report-summary { margin: 0; font-size: 14px; line-height: 1.5; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+    .report-more summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+    .report-body { margin-top: 8px; white-space: pre-line; font-size: 14px; line-height: 1.55; color: var(--muted); max-height: 420px; overflow-y: auto; }
+
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .reports { grid-template-columns: minmax(0, 1fr); } }
+    @media (max-width: 600px) {
+      .grid { grid-template-columns: minmax(0, 1fr); }
+      header.top h1 { font-size: 22px; } .main-row { grid-template-columns: 1fr; }
+      .tabs button { padding: 10px 9px; font-size: 14px; } .tabs .count { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Haber Radarı</h1>
+    <nav class="links"><a href="/docs">API</a>{% if settings.rabbitmq_ui_url %}<a href="{{ settings.rabbitmq_ui_url }}" target="_blank" rel="noopener">RabbitMQ</a>{% endif %}</nav>
+  </header>
+
+  <section class="status" id="status" data-level="ok" aria-live="polite">
+    <div class="status-head">
+      <div class="row" id="status-row"><span>Kazıyıcı durumu yükleniyor…</span></div>
+      <div class="progress-label" id="progress-label"></div>
+    </div>
+    <div class="progress" id="progress" data-mode="indeterminate" role="progressbar" aria-label="Kazıma turu" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progress-fill"></div></div>
+    <p class="msg" id="status-msg" hidden></p>
+    <details id="pending-box" hidden><summary id="pending-summary">Çekilemeyen haberler</summary><ul id="pending-list"></ul></details>
+  </section>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-search" aria-selected="true" data-tab="search">Ara</button>
+    <button role="tab" id="tab-alarms" aria-selected="false" data-tab="alarms">Alarmlar<span class="count">{{ alarms | length }}</span></button>
+    <button role="tab" id="tab-reports" aria-selected="false" data-tab="reports">Raporlar<span class="count">{{ reports | length }}</span></button>
+  </div>
+
+  <section class="panel" id="panel-search" role="tabpanel" aria-labelledby="tab-search">
+    <form class="ask" id="ask-form">
+      <label for="question">Soru sor</label>
+      <div class="main-row">
+        <input id="question" placeholder="Fon soruşturmasında son durum ne?" minlength="2" required>
+        <button class="primary" type="submit" id="ask-btn">Sor</button>
+      </div>
+      <p class="note" id="ask-note"></p>
+      <div id="ask-result"></div>
+    </form>
+
+    <form class="bar" id="filter-form">
+      <div class="filters-grid">
+        <div class="field"><label for="source">Kaynak</label><select id="source"><option value="">Tümü</option><option value="hurriyet">Hürriyet</option><option value="12punto">12punto</option></select></div>
+        <div class="field"><label for="since">Son N gün</label><input id="since" type="number" min="1" max="3660" value="{{ settings.rag_recency_days }}"></div>
+        <div class="field"><label for="only-alarms">Yalnızca alarm</label><select id="only-alarms"><option value="false">Hayır</option><option value="true">Evet</option></select></div>
+      </div>
+    </form>
+    <p class="note" id="search-note">En yeni haberler yükleniyor…</p>
+    <div class="grid" id="results"></div>
+  </section>
+
+  <section class="panel" id="panel-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
+    <div class="kw-list"><span>Alarm anahtar kelimeleri</span>{% for k in keywords %}<button type="button" class="chip kw" data-kw="{{ k }}" aria-pressed="false" title="Yalnızca bu kelimeyle yakalanan alarmları göster">{{ k }}</button>{% endfor %}</div>
+    <form class="bar" id="alarm-form">
+      <div class="filters-grid">
+        <div class="field"><label for="alarm-hours">Son N saat</label><input id="alarm-hours" type="number" min="1" max="8760" value="48"></div>
+        <div class="field"><label for="alarm-dups">Tekrarlar</label><select id="alarm-dups"><option value="false">Gizle</option><option value="true">Göster</option></select></div>
+        <div class="field"><button class="primary" type="submit">Yenile</button></div>
+      </div>
+    </form>
+    <p class="note" id="alarm-note">{{ alarms | length }} alarm</p>
+    <div class="grid" id="alarms">
+      {% for a in alarms %}
+      <article class="card alarm">
+        <div class="meta"><span class="when">{{ a.source }} · {{ a.published_at | tr_dt }}</span><span class="badge {{ a.alarm_score | score_class }}">skor {{ a.alarm_score }}</span></div>
+        <h3><a href="{{ a.content_url }}" target="_blank" rel="noopener">{{ a.title }}</a></h3>
+        {% if a.reason %}<div class="reason"><p>{{ a.reason }}</p></div>{% endif %}
+        <div class="foot">
+          {% for k in a.matched_keywords[:3] %}<span class="chip kw">{{ k }}</span>{% endfor %}{% if a.needs_review %}<span class="chip review">inceleme</span>{% endif %}
+        </div>
+      </article>
+      {% else %}<p class="empty">Henüz alarm yok. Haberler skorlandıkça burada görünecek.</p>{% endfor %}
+    </div>
+  </section>
+
+  <section class="panel" id="panel-reports" role="tabpanel" aria-labelledby="tab-reports" hidden>
+    <div class="reports">
+    {% for r in reports %}
+      <article class="report">
+        <div class="report-head">
+          <h3>{{ r.kind | kind_label }}</h3>
+          <span class="report-stats">{{ r.total }} haber · {{ r.alarms }} alarm</span>
+        </div>
+        <div class="report-when">{{ r.window_start | tr_dt }} – {{ r.window_end | tr_dt }}</div>
+        {% if r.summary %}<p class="report-summary">{{ r.summary }}</p>{% endif %}
+        {% if r.details %}<details class="report-more"><summary>Raporun tamamı</summary><div class="report-body">{{ r.details }}</div></details>{% endif %}
+      </article>
+    {% else %}<p class="empty">Henüz rapor yok. Raporlama katmanı saatlik rapor ve alarm özeti üretir.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const ASK_LIMIT_MS = {{ (((settings.rag_rewrite_timeout if settings.rag_query_rewrite else 0) + settings.rag_answer_timeout + 60) * 1000) | int }};
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+  const safeUrl = (u) => /^https?:\/\//i.test(String(u || "")) ? esc(u) : "#";
+  /* sunucudaki tr_dt ile aynı biçim: 02.10.2026 22:20 (Türkiye saati) */
+  const trParts = new Intl.DateTimeFormat("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const fmtDate = (iso) => {
+    if (!iso) return "-";
+    const d = new Date(iso);
+    if (isNaN(d)) return esc(iso);
+    const p = Object.fromEntries(trParts.formatToParts(d).map((x) => [x.type, x.value]));
+    return `${p.day}.${p.month}.${p.year} ${p.hour}:${p.minute}`;
+  };
+  const ago = (sec) => sec == null ? "-" : sec < 90 ? `${sec} sn önce` : sec < 5400 ? `${Math.round(sec / 60)} dk önce` : `${Math.round(sec / 3600)} sa önce`;
+  const scoreClass = (s) => s >= 80 ? "critical" : s >= 60 ? "important" : s >= 30 ? "notable" : "routine";
+  const chips = (kws) => (kws || []).slice(0, 3).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("");
+
+  /* sekmeler */
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+    document.querySelectorAll(".panel").forEach((p) => { p.hidden = p.id !== "panel-" + b.dataset.tab; });
+  }));
+
+  /* kazıyıcı durumu + ilerleme çubuğu */
+  let statusTimer = null;
+  let wasRunning = false;
+  function setProgress(mode, pct, label) {
+    const bar = $("progress");
+    bar.dataset.mode = mode;
+    $("progress-fill").style.width = mode === "indeterminate" ? "" : `${Math.max(0, Math.min(100, pct))}%`;
+    if (mode === "indeterminate") bar.removeAttribute("aria-valuenow"); else bar.setAttribute("aria-valuenow", String(Math.round(Math.max(0, Math.min(100, pct)))));
+    $("progress-label").textContent = label || "";
+  }
+  async function loadStatus() {
+    let next = 30000;
+    try {
+      const r = await fetch("/scraper/status");
+      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`);
+      const s = await r.json();
+      const last = s.last_run;
+      const running = Boolean(s.running && s.progress);
+      if (wasRunning && !running) refreshLive();
+      wasRunning = running;
+      let row;
+      let warning = s.warning || "";
+      if (running) row = "<span><strong>Tarama sürüyor</strong></span>";
+      else if (last) row = `<span>Son tarama <strong>${ago(s.last_run_age_seconds)}</strong></span><span><strong>${esc(last.published)}</strong> yeni haber</span>`;
+      else { row = `<span>${esc(warning || "İlk tarama bekleniyor")}</span>`; warning = ""; }
+      $("status-row").innerHTML = row;
+      let level = s.stale ? "alarm" : (s.pending_count ? "warn" : "ok");
+      if (running) {
+        level = "running";
+        const p = s.progress;
+        const pct = Math.round((p.fraction || 0) * 100);
+        const where = p.source ? `${p.source} · ${p.phase === "keşif" ? "bağlantılar bulunuyor" : "haberler çekiliyor"}` : "başlıyor";
+        setProgress(p.fraction > 0 ? "determinate" : "indeterminate", pct, `${where} · %${pct} · ${p.published} yeni haber`);
+        next = 4000;
+      } else if (s.next_run_at && last) {
+        const total = (s.interval_seconds || 300) * 1000;
+        const left = Math.max(0, new Date(s.next_run_at) - Date.now());
+        setProgress("waiting", 100 - (left / total) * 100, left > 0 ? `Sonraki taramaya ${Math.ceil(left / 60000)} dk` : "Sonraki tarama başlamak üzere");
+        next = 15000;
+      } else if (last) {
+        setProgress("waiting", 0, "");  /* zamanlayıcısız tek tur: gösterilecek ilerleme yok */
+      } else {
+        setProgress("indeterminate", 0, "");
+        next = 5000;
+      }
+      $("progress").hidden = !running && Boolean(last) && !s.next_run_at;
+      $("status").dataset.level = level;
+      $("status-msg").hidden = !warning;
+      $("status-msg").textContent = warning;
+      const box = $("pending-box");
+      box.hidden = !(s.pending_count > 0);
+      if (!box.hidden) {
+        $("pending-summary").textContent = `Çekilemeyen haberleri göster (${s.pending_count})`;
+        $("pending-list").innerHTML = (s.pending || []).map((p) => `<li><a href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title || p.url)}</a> <span class="tdate">${esc(p.source)} · ${esc(p.reason)} · ${esc(p.attempts)} deneme</span></li>`).join("");
+      }
+    } catch (e) {
+      $("status").dataset.level = "warn";
+      $("status-row").innerHTML = `<span>Kazıyıcı durumu okunamadı: ${esc(e.message)}</span>`;
+      $("status-msg").hidden = true;
+      setProgress("waiting", 0, "");
+      $("progress").hidden = true;
+    }
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(loadStatus, next);
+  }
+
+  /* haber listesi */
+  function renderArticle(doc, fresh) {
+    const text = (doc.subtitle || "").trim() || (doc.snippet || "").trim();
+    const score = Number(doc.alarm_score || 0);
+    return `<article class="card${doc.is_alarm ? " alarm" : ""}${fresh ? " fresh" : ""}">
+      <div class="meta"><span class="when">${esc(doc.source)} · ${fmtDate(doc.published_at)}</span>${doc.is_alarm ? `<span class="badge ${scoreClass(score)}">alarm ${score}</span>` : ""}</div>
+      <h3><a href="${safeUrl(doc.content_url)}" target="_blank" rel="noopener">${esc(doc.title)}</a></h3>
+      ${text ? `<p class="text">${esc(text)}</p>` : ""}
+      <div class="foot">${chips(doc.matched_keywords)}</div>
+    </article>`;
+  }
+  /* canlı yenileme: liste değişmediyse yeniden çizilmez; yeni gelen kartlar vurgulanır */
+  const keyOf = (d) => d.id || d.content_url || d.title;
+  const signature = (items) => items.map((d) => `${keyOf(d)}:${d.alarm_score ?? ""}`).join("|");
+  let newsShown = null;
+  async function search(ev, silent) {
+    if (ev) ev.preventDefault();
+    const p = new URLSearchParams({ q: "", size: 30, only_alarms: $("only-alarms").value });
+    if ($("source").value) p.set("sources", $("source").value);
+    if ($("since").value) p.set("since_days", $("since").value);
+    if (!silent) { $("search-note").textContent = "Yükleniyor…"; newsShown = null; }
+    try {
+      const r = await fetch("/articles/search?" + p.toString());
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      const stamp = (d) => { const t = Date.parse(d.published_at || ""); return isNaN(t) ? 0 : t; };
+      const items = ((await r.json()).results || []).slice().sort((a, b) => stamp(b) - stamp(a));
+      const sig = signature(items);
+      if (silent && newsShown && newsShown.sig === sig) return;
+      const before = newsShown ? newsShown.keys : null;
+      const fresh = before ? items.filter((d) => !before.has(keyOf(d))).length : 0;
+      newsShown = { sig, keys: new Set(items.map(keyOf)) };
+      $("search-note").textContent = `${items.length} haber` + (fresh ? ` · ${fresh} yeni haber eklendi` : "");
+      $("results").innerHTML = items.length ? items.map((d) => renderArticle(d, before && !before.has(keyOf(d)))).join("") : `<p class="empty">Bu filtrelerle haber yok. Süreyi genişletmeyi deneyin.</p>`;
+    } catch (e) { if (!silent) $("search-note").textContent = "Haberler yüklenemedi: " + e.message; }
+  }
+  /* filtreler değişince liste kendiliğinden yenilenir */
+  $("filter-form").addEventListener("submit", search);
+  ["source", "since", "only-alarms"].forEach((id) => $(id).addEventListener("change", () => search()));
+
+  /* soru */
+  /* daktilo efekti: gelen metin harf harf yazılır; geride kalırsa hızlanır */
+  function typewriter(el) {
+    let target = "", shown = 0, timer = null, waiters = [];
+    const step = () => {
+      const backlog = target.length - shown;
+      if (backlog <= 0) { timer = null; waiters.splice(0).forEach((f) => f()); return; }
+      shown += Math.max(1, Math.ceil(backlog / 40));
+      el.textContent = target.slice(0, shown);
+      timer = setTimeout(step, 20);
+    };
+    return {
+      push(text) { target += text; if (!timer) step(); },
+      done() { return new Promise((res) => { if (!timer && shown >= target.length) res(); else waiters.push(res); }); },
+    };
+  }
+  async function ask(ev) {
+    ev.preventDefault();
+    const question = $("question").value.trim();
+    if (!question) return;
+    $("ask-btn").disabled = true;
+    $("ask-note").textContent = "";
+    $("ask-result").innerHTML = `<article class="block"><p class="answer"><span id="answer-text"></span><span class="dots" id="answer-wait" aria-label="Yanıt hazırlanıyor"><i></i><i></i><i></i></span><span class="caret" id="answer-caret" hidden></span></p></article>`;
+    const tw = typewriter($("answer-text"));
+    let typing = false;
+    const startTyping = () => { if (!typing) { typing = true; $("answer-wait").hidden = true; $("answer-caret").hidden = false; } };
+    /* Ollama skorlayıcıyla paylaşıldığından yanıt sürebilir: sunucu sınırı aşılınca istek kesilir. */
+    const started = Date.now();
+    const ctrl = new AbortController();
+    const limit = setTimeout(() => ctrl.abort(), ASK_LIMIT_MS);
+    try {
+      const r = await fetch("/ask/stream", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, since_days: Number($("since").value) || undefined, sources: $("source").value ? [$("source").value] : undefined }) });
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      /* NDJSON akışı: önce kaynaklar, sonra model metni parça parça, en sonda doğrulanmış yanıt */
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "", streamed = "", answer = null;
+      const onEvent = (ev) => {
+        if (ev.type === "token") { startTyping(); streamed += ev.text; tw.push(ev.text); }
+        else if (ev.type === "answer") answer = ev.answer;
+        else if (ev.type === "error") throw new Error(ev.detail || "akış hatası");
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line) onEvent(JSON.parse(line));
+        }
+        if (done) break;
+      }
+      if (!answer) throw new Error("yanıt tamamlanmadı");
+      /* model akış vermediyse (yedek cevap) son cevap da aynı efektle yazılır */
+      if (!streamed) { startTyping(); tw.push(answer.answer); }
+      await tw.done();
+      const secs = Math.round((Date.now() - started) / 1000);
+      const note = answer.retrieved_count ? `${answer.retrieved_count} haber · ${secs} sn` : "Bu süre içinde soruyla eşleşen haber bulunamadı.";
+      $("ask-note").textContent = note;
+      const timeline = (answer.timeline || []).map((t) => `<li><span class="tdate">${fmtDate(t.date)}</span>${t.citation ? `[${esc(t.citation)}] ` : ""}${esc(t.event)}</li>`).join("");
+      const sources = (answer.sources || []).map((c, i) => `<li>[${i + 1}] <a href="${safeUrl(c.content_url)}" target="_blank" rel="noopener">${esc(c.title)}</a> <span class="tdate">${esc(c.source)} · ${fmtDate(c.published_at)}</span></li>`).join("");
+      $("ask-result").innerHTML = `<article class="block"><p class="answer">${esc(answer.answer)}</p>` +
+        (sources ? `<details class="sources"><summary>Kaynaklar ve zaman çizelgesi (${(answer.sources || []).length})</summary>` +
+          (timeline ? `<h2 class="small" style="margin-top:10px">Zaman çizelgesi</h2><ol class="timeline">${timeline}</ol>` : "") +
+          `<h2 class="small" style="margin-top:10px">Kaynaklar</h2><ol class="srcs">${sources}</ol></details>` : "") + `</article>`;
+    } catch (e) {
+      $("ask-result").innerHTML = "";
+      $("ask-note").textContent = e.name === "AbortError"
+        ? `Yanıt ${Math.round(ASK_LIMIT_MS / 1000)} sn içinde gelmedi; model meşgul olabilir. Biraz sonra yeniden deneyin.`
+        : "Soru yanıtlanamadı: " + e.message;
+    } finally {
+      clearTimeout(limit);
+      $("ask-btn").disabled = false;
+    }
+  }
+  $("ask-form").addEventListener("submit", ask);
+
+  /* alarmlar */
+  function renderAlarm(a, fresh) {
+    const score = Number(a.alarm_score || 0);
+    return `<article class="card alarm${fresh ? " fresh" : ""}">
+      <div class="meta"><span class="when">${esc(a.source)} · ${fmtDate(a.published_at)}</span><span class="badge ${scoreClass(score)}">skor ${score}</span></div>
+      <h3><a href="${safeUrl(a.content_url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
+      ${a.alarm_reason ? `<div class="reason"><p>${esc(a.alarm_reason)}</p></div>` : ""}
+      <div class="foot">${chips(a.matched_keywords)}${a.needs_review ? `<span class="chip review">inceleme</span>` : ""}${a.duplicate_of ? `<span class="chip">tekrar</span>` : ""}</div>
+    </article>`;
+  }
+  let alarmsShown = null;
+  async function loadAlarms(ev, silent) {
+    if (ev) ev.preventDefault();
+    const p = new URLSearchParams({ since_hours: $("alarm-hours").value || 48, size: 99, include_duplicates: $("alarm-dups").value });
+    if (activeKeyword) p.set("keyword", activeKeyword);
+    if (!silent) { $("alarm-note").textContent = "Yükleniyor…"; alarmsShown = null; }
+    try {
+      const r = await fetch("/alarms?" + p.toString());
+      if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+      const data = await r.json();
+      const sig = signature(data.items);
+      if (silent && alarmsShown && alarmsShown.sig === sig) return;
+      const before = alarmsShown ? alarmsShown.keys : null;
+      alarmsShown = { sig, keys: new Set(data.items.map(keyOf)) };
+      $("alarm-note").textContent = activeKeyword ? `"${activeKeyword}" kelimesiyle yakalanan ${data.count} alarm` : `${data.count} alarm`;
+      if (!activeKeyword) $("tab-alarms").querySelector(".count").textContent = data.count;
+      $("alarms").innerHTML = data.items.length ? data.items.map((a) => renderAlarm(a, before && !before.has(keyOf(a)))).join("") : `<p class="empty">${activeKeyword ? "Bu kelimeyle bu aralıkta alarm yok." : "Bu aralıkta alarm yok."}</p>`;
+    } catch (e) { if (!silent) $("alarm-note").textContent = "Alarmlar yüklenemedi: " + e.message; }
+  }
+  $("alarm-form").addEventListener("submit", loadAlarms);
+  /* anahtar kelimeye tıklayınca yalnızca o kelimeyle yakalanan alarmlar; tekrar tıklayınca hepsi */
+  let activeKeyword = "";
+  document.querySelectorAll(".kw-list button.chip").forEach((b) => b.addEventListener("click", () => {
+    activeKeyword = activeKeyword === b.dataset.kw ? "" : b.dataset.kw;
+    document.querySelectorAll(".kw-list button.chip").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.kw === activeKeyword)));
+    loadAlarms();
+  }));
+
+  /* yeni haber ve alarmlar sayfa yenilenmeden gelir: 20 sn'de bir ve her tarama bittiğinde kontrol edilir */
+  const LIVE_MS = 20000;
+  function refreshLive() {
+    if (document.hidden) return;
+    search(null, true);
+    loadAlarms(null, true);
+  }
+  setInterval(refreshLive, LIVE_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshLive(); });
+
+  loadStatus();
+  search();
+  loadAlarms(null, true);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,209 @@
+# scraperhryt — Docker Compose kurulumu
+#
+#   cp .env.example .env            # ayarları düzenleyin (anahtar kelimeler, eşik, Ollama adresi ...)
+#   docker compose up -d --build    # rabbitmq + elasticsearch + setup + scraper/filter/scorer/alarm/reporter/api
+#   docker compose --profile kibana up -d kibana          # isteğe bağlı Kibana (http://localhost:5601)
+#   make up-ollama                                        # Ollama'yı da konteynerde çalıştır: önce model indirilir,
+#                                                         # sonra yığın başlar (bkz. aşağıdaki not)
+#
+# Ollama varsayılan olarak ANA MAKİNEDE çalışır (OLLAMA_BASE_URL=http://host.docker.internal:11434, .env dosyasına bakın);
+# uygulama konteynerleri host-gateway üzerinden ona ulaşır. Ollama varsayılan olarak yalnızca 127.0.0.1'i dinler ve
+# bu adres konteynerlerden ERİŞİLEMEZ: ana makinede `OLLAMA_HOST=0.0.0.0 ollama serve` ile başlatın.
+# `--profile ollama` ile konteynerde çalıştırıyorsanız .env içinde OLLAMA_BASE_URL=http://ollama:11434 yapın.
+# `setup` servisi Ollama'ya erişemezse (ya da model yüklü değilse) HATA ile çıkar ve uygulama servisleri başlamaz;
+# Ollama'sız kurulum için .env içinde OLLAMA_OPTIONAL=1.
+# `--profile ollama` ile İLK açılışta `ollama-pull` modeli (qwen2.5:7b ≈ 4.7 GB) dakikalarca indirir; `setup` ona
+# bağlı değildir (profil dışı bir servis profilli servise bağlanamaz) ve model yokken HATA verirdi. İki çözüm:
+#   * `make up-ollama`: önce `docker compose --profile ollama run --rm ollama-pull` (indirme bitene dek bloklar),
+#     sonra `docker compose --profile ollama up -d`.
+#   * .env içinde OLLAMA_WAIT_SECONDS=900: `setup` Ollama sunucusu + model hazır olana dek bu kadar saniye bekler.
+#
+# Kapanış: skorlayıcı bir Ollama çağrısının ortasında olabilir (OLLAMA_TIMEOUT=180 s, süreç içi 3 deneme); raporlayıcı
+# ve API de anlatı/RAG için LLM çağırır. Bu servislere `stop_grace_period` (LLM_STOP_GRACE, varsayılan 200s) verilir:
+# `docker compose stop|down|restart` SIGTERM sonrası SIGKILL'den önce süren çağrının bitip mesajın onaylanmasını
+# bekler; `-t` vermek gerekmez. Diğer servisler varsayılan 10 s ile durur.
+#
+# scripts/wait-for.sh: compose dışında (systemd, çıplak sunucu) servisleri beklemek için; compose içinde
+# depends_on + healthcheck zaten başlatma sırasını güvence altına alır.
+
+name: scraperhryt
+
+x-app: &app
+  build: .
+  image: scraperhryt:latest
+  env_file: .env
+  environment:
+    # compose ağı içinde servis adları kullanılır; .env'deki değerleri geçersiz kılar (bkz. .env.example).
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+    ELASTICSEARCH_URL: http://elasticsearch:9200
+    STATE_DB_PATH: /app/data/state.sqlite3
+    ALARM_LOG_PATH: /app/data/alarms.jsonl
+  volumes:
+    - data:/app/data
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+x-app-depends: &app-depends
+  rabbitmq:
+    condition: service_healthy
+  elasticsearch:
+    condition: service_healthy
+  setup:
+    condition: service_completed_successfully
+
+services:
+  # ---------------------------------------------------------------- altyapı
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # yönetim paneli: http://localhost:15672 (guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    profiles: ["kibana"]
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    # NVIDIA GPU için (nvidia-container-toolkit kurulu olmalı) aşağıdaki bloğu açın:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-}
+    volumes:
+      - ./scripts/ollama-pull.sh:/ollama-pull.sh:ro
+    entrypoint: ["/bin/sh", "/ollama-pull.sh"]
+    restart: "no"
+
+  # ---------------------------------------------------------------- uygulama
+  setup:
+    <<: *app
+    command: ["scraperhryt", "setup"]
+    restart: "no"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  scraper:
+    <<: *app
+    command: ["scraperhryt", "scrape"]
+    depends_on: *app-depends
+
+  filter:
+    <<: *app
+    command: ["scraperhryt", "filter"]
+    depends_on: *app-depends
+
+  scorer:
+    <<: *app
+    command: ["scraperhryt", "score"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
+    depends_on: *app-depends
+    # Paralel skorlayıcı sayısı: LLM sunucusu eşzamanlı istekleri kaldırıyorsa skorlama o kadar hızlanır.
+    deploy:
+      replicas: ${SCORER_REPLICAS:-2}
+
+  alarm:
+    <<: *app
+    command: ["scraperhryt", "alarm"]
+    depends_on: *app-depends
+
+  reporter:
+    <<: *app
+    command: ["scraperhryt", "report"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
+    depends_on: *app-depends
+
+  api:
+    <<: *app
+    command: ["scraperhryt", "api", "--host", "0.0.0.0", "--port", "8000"]
+    stop_grace_period: ${LLM_STOP_GRACE:-200s}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on: *app-depends
+
+volumes:
+  data:
+  rabbitmq:
+  esdata:
+  ollama:
